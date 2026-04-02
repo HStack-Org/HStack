@@ -3,7 +3,10 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -11,14 +14,14 @@ use hstack_agent::{
     manager::SimpleContextManager,
     memory::{HStackWorld, WorkingMemory},
     provider::{GeminiProvider, OpenAiProvider},
-    Agent, AgentControlSystem,
+    build_base_prompt, Agent, AgentControlSystem, AgentProgressUpdate, AgentPromptProfile,
 };
 use hstack_core::provider::{Message, ProviderConfig, ProviderKind, Role};
 use hstack_core::sync::SyncAction;
 use hstack_core::ticket::Ticket;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout, Margin},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
@@ -219,6 +222,7 @@ struct AppState {
     proposed_actions: Vec<SyncAction>,
     input_buffer: String,
     is_thinking: bool,
+    runtime_status: Option<String>,
     world: FileBackedWorld,
     model_name: String,
     // Scroll states
@@ -246,6 +250,11 @@ impl AppState {
 }
 
 enum AgentResult {
+    Progress {
+        iteration: usize,
+        phase: String,
+        memory: WorkingMemory,
+    },
     Success {
         answer: String,
         deltas: Vec<SyncAction>,
@@ -265,7 +274,7 @@ async fn main() -> Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -277,6 +286,7 @@ async fn main() -> Result<()> {
         proposed_actions: Vec::new(),
         input_buffer: String::new(),
         is_thinking: false,
+        runtime_status: None,
         world,
         model_name,
         stack_state: ListState::default(),
@@ -289,7 +299,7 @@ async fn main() -> Result<()> {
     let res = run_app(&mut terminal, &mut app, provider_config).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
     if let Err(e) = app.world.save() {
@@ -307,7 +317,7 @@ async fn run_app<B: Backend>(
 where
     B::Error: Send + Sync + 'static,
 {
-    let (tx, mut rx) = mpsc::channel(10);
+    let (tx, mut rx) = mpsc::unbounded_channel();
 
     loop {
         terminal.draw(|f| render_ui(f, app))?;
@@ -317,8 +327,15 @@ where
             Ok(result) => {
                 app.is_thinking = false;
                 match result {
+                    AgentResult::Progress { iteration, phase, memory } => {
+                        app.runtime_status = Some(format!("iteration {} • {}", iteration, phase));
+                        app.working_memory = memory;
+                    }
                     AgentResult::Success { answer, deltas, memory, world } => {
-                        app.messages.push(("Agent".to_string(), answer));
+                        app.runtime_status = Some("completed".to_string());
+                        if !answer.trim().is_empty() {
+                            app.messages.push(("Agent".to_string(), answer));
+                        }
                         app.proposed_actions = deltas.clone();
                         app.working_memory = memory;
                         app.world = world;
@@ -333,7 +350,7 @@ where
                         app.conv_scroll = u16::MAX;
                     }
                     AgentResult::Error { error, memory } => {
-                        app.messages.push(("System".to_string(), format!("API Error: {}", error)));
+                        app.runtime_status = Some(format!("runtime error • {}", error));
                         // Important: Save the trace so you can see where it looped/failed
                         app.working_memory = memory; 
                         app.conv_scroll = u16::MAX;
@@ -344,10 +361,7 @@ where
                 if app.is_thinking {
                     // The background thread died unexpectedly!
                     app.is_thinking = false;
-                    app.messages.push((
-                        "System".to_string(), 
-                        "ERROR: The background agent crashed or panicked.".to_string()
-                    ));
+                    app.runtime_status = Some("runtime error • background task crashed".to_string());
                     app.conv_scroll = u16::MAX;
                 }
             }
@@ -356,8 +370,8 @@ where
 
         // Handle UI events without blocking
         if event::poll(Duration::from_millis(16))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     match key.code {
                         KeyCode::Char('c') | KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             break;
@@ -398,6 +412,7 @@ where
                                 app.input_buffer.clear();
                                 app.messages.push(("You".to_string(), input.clone()));
                                 app.is_thinking = true;
+                                app.runtime_status = Some("thinking".to_string());
                                 app.conv_scroll = u16::MAX; // Jump to bottom instantly
 
                                 app.working_memory.messages.push(Message {
@@ -419,32 +434,53 @@ where
                                         ProviderKind::OpenAiCompatible => Box::new(OpenAiProvider::new(config_clone, None)),
                                     };
 
+                                    let tools = match hstack_agent::tool::compose_tools(&[
+                                        "identity",
+                                        "search_stack",
+                                        "scratch_thought",
+                                        "exa_search",
+                                        "light_compute",
+                                    ]) {
+                                        Ok(tools) => tools,
+                                        Err(e) => {
+                                            let _ = tx_clone
+                                                .send(AgentResult::Error {
+                                                    error: format!("Tool configuration error: {}", e),
+                                                    memory: memory_clone,
+                                                });
+                                            return;
+                                        }
+                                    };
+
                                     let agent = Agent {
                                         provider,
                                         manager: Box::new(SimpleContextManager),
                                         control: Box::new(CapturingControl::new()),
-                                        tools: vec![
-                                            Box::new(hstack_agent::tool::IdentityTool),
-                                            Box::new(hstack_agent::tool::SearchStack),
-                                            Box::new(hstack_agent::tool::ScratchThought),
-                                        ],
-                                        base_prompt: "You are an AI assistant helping the user manage their tasks and habits. You have access to their stack (tickets/habits) and can search it or propose changes.\n\nWhen you have completed your task and are ready to respond to the user, you MUST call the `identity` tool with your final answer. Do not just write text - always use the `identity` tool to signal completion.".to_string(),
+                                        tools,
+                                        base_prompt: build_base_prompt(AgentPromptProfile::DebugInteractive),
                                     };
 
-                                    match agent.run(&mut world_clone, &mut memory_clone).await {
+                                    let tx_progress = tx_clone.clone();
+                                    match agent.run_with_progress(&mut world_clone, &mut memory_clone, move |update: AgentProgressUpdate| {
+                                        let _ = tx_progress.send(AgentResult::Progress {
+                                            iteration: update.iteration,
+                                            phase: update.phase,
+                                            memory: update.working_memory,
+                                        });
+                                    }).await {
                                         Ok((answer, deltas)) => {
                                             let _ = tx_clone.send(AgentResult::Success {
                                                 answer,
                                                 deltas,
                                                 memory: memory_clone,
                                                 world: world_clone,
-                                            }).await;
+                                            });
                                         }
                                         Err(e) => {
                                             let _ = tx_clone.send(AgentResult::Error {
                                                 error: e.to_string(),
                                                 memory: memory_clone, // Preserved trace!
-                                            }).await;
+                                            });
                                         }
                                     }
                                 });
@@ -454,11 +490,93 @@ where
                         _ => {}
                     }
                 }
+                Event::Mouse(mouse) => {
+                    handle_mouse_event(app, mouse, terminal.size()?.into());
+                }
+                _ => {}
             }
         }
     }
 
     Ok(())
+}
+
+fn handle_mouse_event(app: &mut AppState, mouse: MouseEvent, terminal_size: Rect) {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => handle_scroll_up(app),
+        MouseEventKind::ScrollDown => handle_scroll_down(app),
+        MouseEventKind::Down(MouseButton::Left) => {
+            handle_mouse_click(app, mouse.column, mouse.row, terminal_size);
+        }
+        _ => {}
+    }
+}
+
+fn handle_mouse_click(app: &mut AppState, column: u16, row: u16, terminal_size: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Min(0),
+            Constraint::Length(5),
+            Constraint::Length(3),
+        ])
+        .split(terminal_size);
+
+    if rect_contains(chunks[1], column, row) {
+        app.focused_panel = Panel::Stack;
+    } else if rect_contains(chunks[2], column, row) {
+        app.focused_panel = Panel::Memory;
+    } else if rect_contains(chunks[3], column, row) {
+        app.focused_panel = Panel::Conversation;
+    } else if rect_contains(chunks[4], column, row) {
+        app.focused_panel = Panel::Actions;
+    }
+
+    let focused_rect = match app.focused_panel {
+        Panel::Stack => chunks[1],
+        Panel::Memory => chunks[2],
+        Panel::Conversation => chunks[3],
+        Panel::Actions => chunks[4],
+    };
+
+    if let Some(is_up_arrow) = hit_scrollbar_arrow(focused_rect, column, row) {
+        if is_up_arrow {
+            handle_scroll_up(app);
+        } else {
+            handle_scroll_down(app);
+        }
+    }
+}
+
+fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
+    let right = rect.x.saturating_add(rect.width);
+    let bottom = rect.y.saturating_add(rect.height);
+    column >= rect.x && column < right && row >= rect.y && row < bottom
+}
+
+fn hit_scrollbar_arrow(panel_rect: Rect, column: u16, row: u16) -> Option<bool> {
+    let scroll_area = panel_rect.inner(Margin { vertical: 1, horizontal: 0 });
+    if scroll_area.width == 0 || scroll_area.height == 0 {
+        return None;
+    }
+
+    let rightmost = scroll_area.x.saturating_add(scroll_area.width).saturating_sub(1);
+    if column != rightmost {
+        return None;
+    }
+
+    let top = scroll_area.y;
+    let bottom = scroll_area.y.saturating_add(scroll_area.height).saturating_sub(1);
+    if row == top {
+        Some(true)
+    } else if row == bottom {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn handle_scroll_up(app: &mut AppState) {
@@ -516,6 +634,39 @@ fn handle_scroll_down(app: &mut AppState) {
     }
 }
 
+fn wrapped_line_count(text: &str, width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    let mut total: u16 = 0;
+
+    for segment in text.split('\n') {
+        let chars = segment.chars().count();
+        let visual = if chars == 0 {
+            1
+        } else {
+            chars.div_ceil(width)
+        };
+        total = total.saturating_add(visual as u16);
+    }
+
+    total
+}
+
+fn estimate_conversation_height(app: &AppState, body_width: u16) -> u16 {
+    let mut lines: u16 = 0;
+
+    for (role, content) in &app.messages {
+        let prefix = if role == "You" { "> You: " } else { "  Agent: " };
+        let rendered = format!("{}{}", prefix, content);
+        lines = lines.saturating_add(wrapped_line_count(&rendered, body_width));
+    }
+
+    if app.is_thinking {
+        lines = lines.saturating_add(wrapped_line_count("  [Agent is thinking...]", body_width));
+    }
+
+    lines
+}
+
 fn render_ui(f: &mut ratatui::Frame, app: &mut AppState) {
     let size = f.area();
 
@@ -540,7 +691,8 @@ fn render_ui(f: &mut ratatui::Frame, app: &mut AppState) {
     };
 
     // Header
-    let header_text = format!(" hstack-cli • {} • ctrl+c: quit • Tab: switch panel ", app.model_name);
+    let status = app.runtime_status.as_deref().unwrap_or("idle");
+    let header_text = format!(" hstack-cli • {} • {} • ctrl+c: quit • Tab: switch panel ", app.model_name, status);
     let header = Paragraph::new(header_text)
         .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)))
         .style(Style::default().fg(Color::Cyan));
@@ -611,8 +763,9 @@ fn render_ui(f: &mut ratatui::Frame, app: &mut AppState) {
     }
 
     // CLAMP SCROLLING LOGIC
-    let content_lines = conv_text.len() as u16;
-    let visible_height = chunks[3].height.saturating_sub(2); // subtract top/bottom borders
+    let conv_inner = chunks[3].inner(Margin { vertical: 1, horizontal: 1 });
+    let content_lines = estimate_conversation_height(app, conv_inner.width.max(1));
+    let visible_height = conv_inner.height;
     let max_scroll = content_lines.saturating_sub(visible_height);
     
     // Ensure we don't scroll past the actual text bounds

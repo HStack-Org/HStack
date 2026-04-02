@@ -3,6 +3,119 @@ use hstack_core::sync::SyncAction;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DecodeAnomalyKind {
+    AssistantContentIgnored,
+    ToolInvalidArguments { tool_name: String },
+    ToolExecutionFailed { tool_name: String },
+    UnknownTool { tool_name: String },
+    NonActionableAssistantContent,
+    NoActionableModelOutput,
+    MultipleDecodeAnomalies,
+}
+
+/// A structured decode/runtime anomaly produced while interpreting a provider turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecodeAnomaly {
+    pub kind: DecodeAnomalyKind,
+    pub payload: Value,
+}
+
+impl DecodeAnomaly {
+    pub fn assistant_content_ignored(content: String) -> Self {
+        Self {
+            kind: DecodeAnomalyKind::AssistantContentIgnored,
+            payload: serde_json::json!({
+                "reason": "content_with_tool_calls_has_no_semantic_effect",
+                "content": content,
+            }),
+        }
+    }
+
+    pub fn tool_invalid_arguments(tool_name: String, error: String, raw_arguments: String) -> Self {
+        Self {
+            kind: DecodeAnomalyKind::ToolInvalidArguments { tool_name },
+            payload: serde_json::json!({
+                "type": "invalid_arguments",
+                "error": error,
+                "raw_arguments": raw_arguments,
+            }),
+        }
+    }
+
+    pub fn tool_execution_failed(tool_name: String, error: String) -> Self {
+        Self {
+            kind: DecodeAnomalyKind::ToolExecutionFailed { tool_name },
+            payload: serde_json::json!({
+                "type": "tool_execution_failed",
+                "error": error,
+            }),
+        }
+    }
+
+    pub fn unknown_tool(tool_name: String) -> Self {
+        Self {
+            kind: DecodeAnomalyKind::UnknownTool { tool_name },
+            payload: serde_json::json!({
+                "type": "unknown_tool",
+                "error": "Unknown tool",
+            }),
+        }
+    }
+
+    pub fn non_actionable_assistant_content(content: String) -> Self {
+        Self {
+            kind: DecodeAnomalyKind::NonActionableAssistantContent,
+            payload: serde_json::json!({
+                "reason": "non_actionable_assistant_content",
+                "content": content,
+            }),
+        }
+    }
+
+    pub fn no_actionable_model_output() -> Self {
+        Self {
+            kind: DecodeAnomalyKind::NoActionableModelOutput,
+            payload: serde_json::json!({ "reason": "no_actionable_model_output" }),
+        }
+    }
+
+    pub fn multiple(anomalies: Vec<DecodeAnomaly>) -> Self {
+        Self {
+            kind: DecodeAnomalyKind::MultipleDecodeAnomalies,
+            payload: serde_json::json!({
+                "reason": "multiple_decode_anomalies",
+                "anomalies": anomalies.into_iter().map(|a| serde_json::json!({
+                    "key": a.key(),
+                    "payload": a.payload,
+                })).collect::<Vec<_>>(),
+            }),
+        }
+    }
+
+    pub fn key(&self) -> String {
+        match &self.kind {
+            DecodeAnomalyKind::AssistantContentIgnored => "assistant_content_ignored".to_string(),
+            DecodeAnomalyKind::ToolInvalidArguments { tool_name }
+            | DecodeAnomalyKind::ToolExecutionFailed { tool_name }
+            | DecodeAnomalyKind::UnknownTool { tool_name } => format!("tool_error:{}", tool_name),
+            DecodeAnomalyKind::NonActionableAssistantContent
+            | DecodeAnomalyKind::NoActionableModelOutput
+            | DecodeAnomalyKind::MultipleDecodeAnomalies => "agent_runtime".to_string(),
+        }
+    }
+}
+
+/// The result of decoding a raw provider turn under the harness transition algebra.
+///
+/// A turn either yields a valid action to apply or a structural anomaly to record.
+/// Raw provider output never has semantic effect on its own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DecodedTurn {
+    Action(AgentAction),
+    Anomaly(DecodeAnomaly),
+}
+
 /// Represents a modification to the agent's internal working memory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkingMemoryDelta {

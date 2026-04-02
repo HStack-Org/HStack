@@ -151,7 +151,10 @@ impl LocalRateLimiter {
     }
 
     fn now_f64() -> f64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64()
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(d) => d.as_secs_f64(),
+            Err(_) => 0.0,
+        }
     }
 }
 
