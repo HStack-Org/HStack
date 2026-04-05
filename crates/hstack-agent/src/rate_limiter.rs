@@ -87,9 +87,9 @@ impl RateLimiter for RedisRateLimiter {
         let mut conn = self.client.get_multiplexed_async_connection().await.map_err(|e| Error::Redis(e.to_string()))?;
         
         let keys = vec![
-            format!("rl:prov:{}:batch:rps", provider_id),
-            format!("rl:prov:{}:batch:rpm", provider_id),
-            format!("rl:prov:{}:batch:tpm", provider_id),
+            format!("rl:prov:{provider_id}:batch:rps"),
+            format!("rl:prov:{provider_id}:batch:rpm"),
+            format!("rl:prov:{provider_id}:batch:tpm"),
         ];
 
         let args = vec![
@@ -109,8 +109,8 @@ impl RateLimiter for RedisRateLimiter {
             .await
             .map_err(|e| Error::Redis(e.to_string()))?;
 
-        if result.len() < 2 { 
-            return Err(Error::Internal("Malformed redis response".to_string())); 
+        if result.len() < 2 {
+            return Err(Error::Redis("Malformed redis response".to_string()));
         }
         
         let allowed = result[0] == "1";
@@ -168,9 +168,9 @@ impl RateLimiter for LocalRateLimiter {
         let mut updates = Vec::new();
 
         let limits = [
-            (format!("rl:prov:{}:batch:rps", provider_id), config.requests_per_second as f64, 1.0, request_cost as f64),
-            (format!("rl:prov:{}:batch:rpm", provider_id), config.requests_per_minute as f64, 60.0, request_cost as f64),
-            (format!("rl:prov:{}:batch:tpm", provider_id), config.tokens_per_minute as f64, 60.0, token_cost as f64),
+            (format!("rl:prov:{provider_id}:batch:rps"), config.requests_per_second as f64, 1.0, request_cost as f64),
+            (format!("rl:prov:{provider_id}:batch:rpm"), config.requests_per_minute as f64, 60.0, request_cost as f64),
+            (format!("rl:prov:{provider_id}:batch:tpm"), config.tokens_per_minute as f64, 60.0, token_cost as f64),
         ];
 
         for (key, limit, window, cost) in limits {

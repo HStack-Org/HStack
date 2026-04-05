@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::action::AgentAction;
 use crate::error::Error;
-use crate::memory::HStackWorld;
+use crate::memory::{HStackWorld, WorkingMemory};
 use crate::tool::Tool;
 
 /// The Identity tool allows the agent to signal that it has finished its task.
@@ -23,19 +23,17 @@ impl Tool for IdentityTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "answer": { "type": "string", "description": "The final natural language response to the user." }
+                "answer": { "type": "string", "description": "The final natural language response to the user. This may be empty when the agent terminates with an explicit empty reply." }
             },
             "required": ["answer"]
         })
     }
 
-    async fn execute(&self, args: Value, _world: &dyn HStackWorld) -> Result<AgentAction, Error> {
+    async fn execute(&self, args: Value, _world: &dyn HStackWorld, _memory: &WorkingMemory) -> Result<AgentAction, Error> {
         let answer = args
             .get("answer")
             .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|answer| !answer.is_empty())
-            .ok_or_else(|| Error::Provider("identity requires a non-empty 'answer' string".to_string()))?
+            .ok_or_else(|| Error::Provider("identity requires an 'answer' string".to_string()))?
             .to_string();
         Ok(AgentAction::Stop(answer))
     }

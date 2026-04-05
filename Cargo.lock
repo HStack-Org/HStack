@@ -2484,8 +2484,10 @@ dependencies = [
 name = "hstack-app"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "futures-util",
+ "hstack-agent",
  "hstack-core",
  "keyring 3.6.3",
  "regex",

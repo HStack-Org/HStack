@@ -20,6 +20,12 @@ pub enum Error {
     #[error("Provider error: {0}")]
     Provider(String),
 
+    #[error("Provider contract error: {0}")]
+    ProviderContract(String),
+
+    #[error("Invariant violation: {0}")]
+    Invariant(String),
+
     #[error("Rate limit exceeded")]
     RateLimit,
 

@@ -82,20 +82,16 @@ pub async fn generate_gemini_content(
     );
 
     let mut gemini_contents = Vec::new();
-    let mut system_instruction = None;
+    let mut system_parts: Vec<GeminiPart> = Vec::new();
 
     for msg in messages {
         match msg.role {
             Role::System => {
-                let part = GeminiPart {
+                system_parts.push(GeminiPart {
                     text: msg.content.clone(),
                     function_call: None,
                     function_response: None,
                     thought_signature: None,
-                };
-                system_instruction = Some(GeminiContent {
-                    role: "user".to_string(),
-                    parts: vec![part],
                 });
             }
             Role::User => {
@@ -125,7 +121,12 @@ pub async fn generate_gemini_content(
                         let args_val_result = serde_json::from_str::<Value>(&call.function.arguments);
                         let args_val = match args_val_result {
                             Ok(v) => v,
-                            Err(_) => Value::Null,
+                            Err(e) => {
+                                return Err(Error::Invariant(format!(
+                                    "assistant tool call '{}' carried malformed stored JSON arguments: {e}",
+                                    call.function.name
+                                )))
+                            }
                         };
                         parts.push(GeminiPart {
                             text: None,
@@ -153,14 +154,23 @@ pub async fn generate_gemini_content(
                         Ok(v) => v,
                         Err(_) => serde_json::json!({ "result": content }),
                     },
-                    None => serde_json::json!({ "result": "No content" }),
+                    None => {
+                        return Err(Error::Invariant(
+                            "tool message is missing content for Gemini provider encoding".to_string(),
+                        ))
+                    }
                 };
+                let tool_name = msg.name.clone().ok_or_else(|| {
+                    Error::Invariant(
+                        "tool message is missing name for Gemini provider encoding".to_string(),
+                    )
+                })?;
 
                 let part = GeminiPart {
                     text: None,
                     function_call: None,
                     function_response: Some(GeminiFunctionResponse {
-                        name: msg.name.clone().unwrap_or_default(),
+                        name: tool_name,
                         response: response_val,
                     }),
                     thought_signature: None,
@@ -188,6 +198,15 @@ pub async fn generate_gemini_content(
             }])
         }
         None => None,
+    };
+
+    let system_instruction = if system_parts.is_empty() {
+        None
+    } else {
+        Some(GeminiContent {
+            role: "user".to_string(),
+            parts: system_parts,
+        })
     };
 
     let request = GeminiRequest {
@@ -219,7 +238,7 @@ pub async fn generate_gemini_content(
     let response_data_result: Result<GeminiResponse, reqwest::Error> = response.json().await;
     let response_data = match response_data_result {
         Ok(data) => data,
-        Err(e) => return Err(Error::Internal(format!("Failed to parse response: {}", e))),
+        Err(e) => return Err(Error::Provider(format!("Malformed provider response: {e}"))),
     };
 
     let candidates = match response_data.candidates {
@@ -241,10 +260,8 @@ pub async fn generate_gemini_content(
             content_str = Some(text);
         }
         if let Some(fc) = part.function_call {
-            let args_string = match serde_json::to_string(&fc.args) {
-                Ok(s) => s,
-                Err(_) => "{}".to_string(),
-            };
+            let args_string = serde_json::to_string(&fc.args)
+                .map_err(|e| Error::ProviderContract(format!("Gemini function_call args were not serializable JSON: {e}")))?;
             tool_calls.push(ToolCall {
                 id: uuid::Uuid::new_v4().to_string(), // use real uuid
                 r#type: "function".to_string(),

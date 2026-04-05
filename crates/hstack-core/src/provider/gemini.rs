@@ -124,7 +124,12 @@ pub async fn generate_gemini_content(
                         let args_val_result = serde_json::from_str::<Value>(&call.function.arguments);
                         let args_val = match args_val_result {
                             Ok(v) => v,
-                            Err(_) => Value::Null,
+                            Err(e) => {
+                                return Err(Error::Invariant(format!(
+                                    "assistant tool call '{}' carried malformed stored JSON arguments: {e}",
+                                    call.function.name
+                                )))
+                            }
                         };
                         parts.push(GeminiPart {
                             text: None,
@@ -152,14 +157,23 @@ pub async fn generate_gemini_content(
                         Ok(v) => v,
                         Err(_) => serde_json::json!({ "result": content }),
                     },
-                    None => serde_json::json!({ "result": "No content" }),
+                    None => {
+                        return Err(Error::Invariant(
+                            "tool message is missing content for Gemini provider encoding".to_string(),
+                        ))
+                    }
                 };
+                let tool_name = msg.name.clone().ok_or_else(|| {
+                    Error::Invariant(
+                        "tool message is missing name for Gemini provider encoding".to_string(),
+                    )
+                })?;
 
                 let part = GeminiPart {
                     text: None,
                     function_call: None,
                     function_response: Some(GeminiFunctionResponse {
-                        name: msg.name.clone().unwrap_or_default(),
+                        name: tool_name,
                         response: response_val,
                     }),
                     thought_signature: None,
@@ -218,18 +232,18 @@ pub async fn generate_gemini_content(
     let response_data_result: Result<GeminiResponse, reqwest::Error> = response.json().await;
     let response_data = match response_data_result {
         Ok(data) => data,
-        Err(e) => return Err(Error::Internal(format!("Failed to parse response: {}", e))),
+        Err(e) => return Err(Error::ProviderContract(format!("Malformed provider response: {e}"))),
     };
 
     let candidates = match response_data.candidates {
         Some(c) => c,
-        None => return Err(Error::Provider("API returned no candidates".to_string())),
+        None => return Err(Error::ProviderContract("API returned no candidates".to_string())),
     };
 
     let mut candidate_iter = candidates.into_iter();
     let candidate = match candidate_iter.next() {
         Some(c) => c,
-        None => return Err(Error::Provider("API returned empty candidates list".to_string())),
+        None => return Err(Error::ProviderContract("API returned empty candidates list".to_string())),
     };
 
     let mut content_str = None;
@@ -240,10 +254,8 @@ pub async fn generate_gemini_content(
             content_str = Some(text);
         }
         if let Some(fc) = part.function_call {
-            let args_string = match serde_json::to_string(&fc.args) {
-                Ok(s) => s,
-                Err(_) => "{}".to_string(),
-            };
+            let args_string = serde_json::to_string(&fc.args)
+                .map_err(|e| Error::ProviderContract(format!("Gemini function_call args were not serializable JSON: {e}")))?;
             tool_calls.push(ToolCall {
                 id: "gemini_call".to_string(),
                 r#type: "function".to_string(),

@@ -118,6 +118,7 @@ pub enum CommuteDepartureTime {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum TicketPayload {
     Commute {
         title: String,
@@ -252,7 +253,7 @@ where
         None | Some(Value::Null) => Ok(None),
         Some(value) => serde_json::from_value(value.clone())
             .map(Some)
-            .map_err(|_| format!("invalid {} value", key)),
+            .map_err(|_| format!("invalid {key} value")),
     }
 }
 
@@ -690,7 +691,7 @@ mod tests {
                 assert_eq!(priority, Some(TicketPriority::High));
                 assert_eq!(completed, None);
             }
-            other => panic!("expected event payload, got {:?}", other),
+            other => panic!("expected event payload, got {other:?}"),
         }
     }
 
@@ -714,7 +715,7 @@ mod tests {
                 assert_eq!(expires_at.as_deref(), Some("2026-03-20T22:00:00+00:00"));
                 assert_eq!(priority, None);
             }
-            other => panic!("expected countdown payload, got {:?}", other),
+            other => panic!("expected countdown payload, got {other:?}"),
         }
     }
 
@@ -742,7 +743,7 @@ mod tests {
                 assert_eq!(status, Some(TaskWorkflowStatus::InProgress));
                 assert_eq!(priority, Some(TicketPriority::Urgent));
             }
-            other => panic!("expected task payload, got {:?}", other),
+            other => panic!("expected task payload, got {other:?}"),
         }
     }
 
@@ -773,7 +774,7 @@ mod tests {
                     label: Some("Office".to_string()),
                 }));
             }
-            other => panic!("expected commute payload, got {:?}", other),
+            other => panic!("expected commute payload, got {other:?}"),
         }
     }
 
@@ -795,7 +796,7 @@ mod tests {
                     label: Some("Home".to_string()),
                 }));
             }
-            other => panic!("expected event payload, got {:?}", other),
+            other => panic!("expected event payload, got {other:?}"),
         }
     }
 
@@ -819,7 +820,7 @@ mod tests {
                 }));
                 assert_eq!(scheduled_time_iso.as_deref(), Some("2026-03-25T09:00:00+00:00"));
             }
-            other => panic!("expected commute payload, got {:?}", other),
+            other => panic!("expected commute payload, got {other:?}"),
         }
     }
 
@@ -874,7 +875,7 @@ mod tests {
                 assert_eq!(status, Some(HabitWorkflowStatus::Active));
                 assert_eq!(priority, Some(TicketPriority::Medium));
             }
-            other => panic!("expected habit payload, got {:?}", other),
+            other => panic!("expected habit payload, got {other:?}"),
         }
     }
 
@@ -891,7 +892,7 @@ mod tests {
                 assert_eq!(status, Some(HabitWorkflowStatus::Active));
                 assert_eq!(priority, Some(TicketPriority::Medium));
             }
-            other => panic!("expected habit payload, got {:?}", other),
+            other => panic!("expected habit payload, got {other:?}"),
         }
     }
 
@@ -934,7 +935,7 @@ mod tests {
                 assert_eq!(status, Some(EventAttendanceStatus::Mandatory));
                 assert_eq!(priority, Some(TicketPriority::High));
             }
-            other => panic!("expected event payload, got {:?}", other),
+            other => panic!("expected event payload, got {other:?}"),
         }
     }
 }

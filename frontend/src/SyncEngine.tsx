@@ -36,6 +36,9 @@ interface SyncContextType {
   updateTicketStatus: (id: string, status: TicketStatus) => Promise<void>;
   deleteTicket: (id: string) => Promise<void>;
   syncNow: () => Promise<void>;
+  proposedActions: any[];
+  acceptProposals: () => Promise<void>;
+  rejectProposals: () => Promise<void>;
 }
 
 interface SyncSettings extends UserSettingsShape {
@@ -70,6 +73,7 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
   const [connectionPhase, setConnectionPhase] = useState('idle');
   const [syncSettings, setSyncSettings] = useState<SyncSettings | null>(null);
   const [syncSession, setSyncSession] = useState<SyncSessionInfo | null>(null);
+  const [proposedActions, setProposedActions] = useState<any[]>([]);
 
   const refreshTickets = useCallback(async () => {
     try {
@@ -77,6 +81,15 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
       setTickets(nextTickets);
     } catch (error) {
       console.error('Failed to refresh tickets from Rust sync state:', error);
+    }
+  }, []);
+
+  const fetchAgentProposals = useCallback(async () => {
+    try {
+      const actions = await invoke<any[]>('get_agent_proposals');
+      setProposedActions(actions);
+    } catch (error) {
+      console.error('Failed to fetch agent proposals:', error);
     }
   }, []);
 
@@ -132,10 +145,21 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
       removeTicketsListener = unlisten;
     });
 
+    let removeProposalsSyncListener: (() => void) | null = null;
+    void listen('AGENT_PROPOSALS_SYNC', () => {
+      void fetchAgentProposals();
+    }).then((unlisten) => {
+      removeProposalsSyncListener = unlisten;
+    });
+
+    // Initial load of proposals
+    void fetchAgentProposals();
+
     return () => {
       window.removeEventListener(SYNC_CONFIG_UPDATED_EVENT, handleSyncConfigUpdated);
       removeStatusListener?.();
       removeTicketsListener?.();
+      removeProposalsSyncListener?.();
     };
   }, [loadSyncConfig, loadSyncStatus, refreshTickets]);
 
@@ -200,6 +224,25 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
     }
   }, []);
 
+  const acceptProposals = async () => {
+    try {
+      await invoke('accept_agent_proposals');
+      setProposedActions([]);
+      await syncNow();
+    } catch (error) {
+      console.error('Failed to accept proposals:', error);
+    }
+  };
+
+  const rejectProposals = async () => {
+    try {
+      await invoke('reject_agent_proposals');
+      setProposedActions([]);
+    } catch (error) {
+      console.error('Failed to reject proposals:', error);
+    }
+  };
+
 
   return (
     <SyncContext.Provider
@@ -213,6 +256,9 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
         updateTicketStatus,
         deleteTicket,
         syncNow,
+        proposedActions,
+        acceptProposals,
+        rejectProposals,
       }}
     >
       {children}

@@ -1,4 +1,5 @@
 use crate::memory::{HStackWorld, WorkingMemory};
+use crate::workspace::{compose_workspace_system_message, short_term_messages, workspace_runtime_snapshot};
 use hstack_core::provider::{Message, Role};
 use async_trait::async_trait;
 use crate::error::Error;
@@ -26,18 +27,24 @@ impl ContextManager for SimpleContextManager {
         memory: &WorkingMemory,
         base_prompt: &str,
     ) -> Result<Vec<Message>, Error> {
-        let tickets = world.get_tickets().await.map_err(Error::World)?;
-        let tickets_json = serde_json::to_string_pretty(&tickets).unwrap_or_else(|_| "[]".to_string());
-        
+        let stack_snapshot = world.get_stack_snapshot().await.map_err(Error::World)?;
+        let tickets = stack_snapshot.projected_agent_tickets(&memory.proposed_stack_actions);
+        let settings = world.get_user_settings().await.map_err(Error::World)?;
+
         let mut messages = Vec::new();
-        
-        // Build the system prompt with context
-        let system_content = format!(
-            "{}\n\nCURRENT STACK CONTEXT:\n{}\n\nRECENT THOUGHTS:\n{:?}",
+
+        let mut system_content = compose_workspace_system_message(
             base_prompt,
-            tickets_json,
-            memory.technical_noise
+            memory,
+            &tickets,
+            &settings,
+            &stack_snapshot.pending_actions,
         );
+        let workspace_snapshot = workspace_runtime_snapshot(memory);
+        system_content.push_str("\nWORKSPACE SNAPSHOT\n");
+        let workspace_snapshot_json = serde_json::to_string_pretty(&workspace_snapshot)
+            .map_err(|e| Error::Serialization(format!("Failed to serialize workspace snapshot: {e}")))?;
+        system_content.push_str(&workspace_snapshot_json);
         
         messages.push(Message {
             role: Role::System,
@@ -46,9 +53,8 @@ impl ContextManager for SimpleContextManager {
             tool_call_id: None,
             name: None,
         });
-        
-        // Add the conversation history from working memory
-        messages.extend(memory.messages.clone());
+
+        messages.extend(short_term_messages(memory));
         
         Ok(messages)
     }

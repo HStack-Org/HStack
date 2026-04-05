@@ -24,7 +24,7 @@ pub fn tool_schemas() -> Vec<Tool> {
                         },
                         "rrule": {
                             "type": "string",
-                            "description": "Optional: RFC 5545 scheduling string for any time-bearing ticket type. Use 'DTSTART:YYYYMMDDTHHMMSS' for a one-time scheduled ticket, or 'DTSTART:YYYYMMDDTHHMMSS RRULE:FREQ=WEEKLY;BYDAY=MO' for a recurring ticket. Examples: DTSTART:20260320T090000Z (tomorrow 9am), DTSTART:20260324T090000Z RRULE:FREQ=WEEKLY;BYDAY=MO (every Monday)"
+                            "description": "Optional: RFC 5545 scheduling string for any time-bearing ticket type. Use 'DTSTART:YYYYMMDDTHHMMSS' for a one-time scheduled ticket, or 'DTSTART:YYYYMMDDTHHMMSS RRULE:FREQ=WEEKLY;BYDAY=MO' for a recurring ticket. Examples: DTSTART:20260320T090000 (tomorrow 9am), DTSTART:20260324T090000 RRULE:FREQ=WEEKLY;BYDAY=MO (every Monday)"
                         },
                         "duration_minutes": {
                             "type": "integer",
@@ -116,7 +116,7 @@ pub fn tool_schemas() -> Vec<Tool> {
                         },
                         "rrule": {
                             "type": "string",
-                            "description": "The new RFC 5545 schedule for this ticket. Skip if no change. Format: 'DTSTART:YYYYMMDDTHHMMSSZ' for one-time scheduling or 'DTSTART:YYYYMMDDTHHMMSSZ RRULE:FREQ=WEEKLY;BYDAY=MO' for recurrence. Valid for HABIT, EVENT, and TASK tickets."
+                            "description": "The new RFC 5545 schedule for this ticket. Skip if no change. Format: 'DTSTART:YYYYMMDDTHHMMSS' for one-time scheduling or 'DTSTART:YYYYMMDDTHHMMSS RRULE:FREQ=WEEKLY;BYDAY=MO' for recurrence. Valid for HABIT, EVENT, and TASK tickets."
                         },
                         "duration_minutes": {
                             "type": "integer",

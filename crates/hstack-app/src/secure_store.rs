@@ -27,7 +27,7 @@ impl SecureStore {
     #[cfg(not(mobile))]
     fn desktop_entry(account: &str) -> Result<Entry, String> {
         Entry::new(Self::SERVICE_NAME, account)
-            .map_err(|e| format!("OS Keychain access error: {}", e))
+            .map_err(|e| format!("OS Keychain access error: {e}"))
     }
 
     #[cfg(not(mobile))]
@@ -37,9 +37,9 @@ impl SecureStore {
         match entry.get_password() {
             Ok(raw) => serde_json::from_str::<HashMap<String, String>>(&raw)
                 .map(Some)
-                .map_err(|e| format!("Failed to parse bundled secret store from OS Keychain: {}", e)),
+                .map_err(|e| format!("Failed to parse bundled secret store from OS Keychain: {e}")),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(format!("Failed to retrieve bundled secret store from OS Keychain: {}", e)),
+            Err(e) => Err(format!("Failed to retrieve bundled secret store from OS Keychain: {e}")),
         }
     }
 
@@ -47,11 +47,11 @@ impl SecureStore {
     fn save_desktop_bundle_entries(entries: &HashMap<String, String>) -> Result<(), String> {
         let entry = Self::desktop_entry(Self::DESKTOP_BUNDLE_ACCOUNT)?;
         let serialized = serde_json::to_string(entries)
-            .map_err(|e| format!("Failed to serialize bundled secret store: {}", e))?;
+            .map_err(|e| format!("Failed to serialize bundled secret store: {e}"))?;
 
         entry
             .set_password(&serialized)
-            .map_err(|e| format!("Failed to save bundled secret store to OS Keychain: {}", e))
+            .map_err(|e| format!("Failed to save bundled secret store to OS Keychain: {e}"))
     }
 
     #[cfg(not(mobile))]
@@ -61,7 +61,7 @@ impl SecureStore {
         match entry.get_password() {
             Ok(password) => Ok(Some(password)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(format!("Failed to retrieve secret from OS Keychain: {}", e)),
+            Err(e) => Err(format!("Failed to retrieve secret from OS Keychain: {e}")),
         }
     }
 
@@ -71,7 +71,7 @@ impl SecureStore {
 
         match entry.delete_credential() {
             Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(format!("Failed to delete secret from OS Keychain: {}", e)),
+            Err(e) => Err(format!("Failed to delete secret from OS Keychain: {e}")),
         }
     }
 
@@ -139,7 +139,7 @@ impl SecureStore {
                 return Ok(key.clone());
             }
 
-            return match Self::load_legacy_desktop_key(id)? {
+            match Self::load_legacy_desktop_key(id)? {
                 Some(password) => {
                     bundle_entries.insert(id.to_string(), password.clone());
                     Self::save_desktop_bundle_entries(&bundle_entries)?;
@@ -151,7 +151,7 @@ impl SecureStore {
                     Ok(password)
                 }
                 None => Ok("".to_string()),
-            };
+            }
         }
 
         #[cfg(mobile)]
@@ -216,7 +216,7 @@ impl SecureStore {
                 cache.extend(bundle_entries);
             }
 
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(mobile)]

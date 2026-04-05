@@ -42,7 +42,8 @@ pub async fn generate_openai_content(
     tools: Option<&[Tool]>,
 ) -> Result<Message, Error> {
     let client = reqwest::Client::new();
-    let api_url = format!("{}/chat/completions", config.endpoint.trim_end_matches('/'));
+    let endpoint = config.endpoint.trim_end_matches('/');
+    let api_url = format!("{endpoint}/chat/completions");
 
     let mut mapped_messages = Vec::new();
     for m in messages {
@@ -101,14 +102,15 @@ pub async fn generate_openai_content(
         let auth_str = if config.api_key.starts_with("Bearer ") {
             config.api_key.clone()
         } else {
-            format!("Bearer {}", config.api_key)
+            let api_key = &config.api_key;
+            format!("Bearer {api_key}")
         };
         match reqwest::header::HeaderValue::from_str(&auth_str) {
             Ok(val) => {
                 headers.insert(reqwest::header::AUTHORIZATION, val);
             }
             Err(e) => {
-                return Err(Error::Header(format!("Invalid API key format: {}", e)));
+                return Err(Error::Header(format!("Invalid API key format: {e}")));
             }
         }
     }
@@ -132,7 +134,7 @@ pub async fn generate_openai_content(
             Err(_) => "Could not read error body".to_string(),
         };
         debug!(status, body = %body, "OpenAI-compatible API returned an error response");
-        return Err(Error::Provider(format!("API error (status {}): {}", status, body)));
+        return Err(Error::Provider(format!("API error (status {status}): {body}")));
     }
 
     let response_data_result: Result<OpenAiChatResponse, reqwest::Error> = response.json().await;
@@ -140,7 +142,7 @@ pub async fn generate_openai_content(
         Ok(data) => data,
         Err(e) => {
             debug!(error = %e, "failed to parse OpenAI-compatible response body");
-            return Err(Error::Internal(format!("Failed to parse response: {}", e)));
+            return Err(Error::Provider(format!("Malformed provider response: {e}")));
         }
     };
 

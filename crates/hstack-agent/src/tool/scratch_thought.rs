@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::action::{AgentAction, WorkingMemoryDelta};
+use crate::action::AgentAction;
 use crate::error::Error;
-use crate::memory::HStackWorld;
+use crate::memory::{HStackWorld, WorkingMemory};
 use crate::tool::Tool;
+use crate::workspace::WorkspaceDelta;
 
 /// Allows the agent to store internal thoughts or intermediate reasoning in working memory.
 pub struct ScratchThought;
@@ -30,16 +31,25 @@ impl Tool for ScratchThought {
         })
     }
 
-    async fn execute(&self, args: Value, _world: &dyn HStackWorld) -> Result<AgentAction, Error> {
+    async fn execute(&self, args: Value, _world: &dyn HStackWorld, _memory: &WorkingMemory) -> Result<AgentAction, Error> {
         let thought = args
             .get("thought")
             .and_then(Value::as_str)
-            .unwrap_or("")
+            .map(str::trim)
+            .filter(|thought| !thought.is_empty())
+            .ok_or_else(|| Error::Provider("scratch_thought requires a non-empty 'thought' string".to_string()))?
             .to_string();
-        let metadata = args.get("metadata").cloned().unwrap_or(Value::Null);
+        let metadata = match args.get("metadata") {
+            None => Value::Null,
+            Some(Value::Object(map)) => Value::Object(map.clone()),
+            Some(Value::Null) => Value::Null,
+            Some(_) => {
+                return Err(Error::Provider(
+                    "scratch_thought 'metadata' must be an object when provided".to_string(),
+                ))
+            }
+        };
 
-        Ok(AgentAction::UpdateWorkingMemory(
-            WorkingMemoryDelta::AddTechnicalNoise(format!("thought:{thought}"), metadata),
-        ))
+        Ok(AgentAction::UpdateWorkspace(WorkspaceDelta::ScratchpadAppend { thought, metadata }))
     }
 }

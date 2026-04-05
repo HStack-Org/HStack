@@ -126,7 +126,7 @@ fn build_direct_voice_request(endpoint: &str, model_name: &str, api_key: &str) -
         .map_err(|error| format!("failed to build direct voice request: {error}"))?;
     request.headers_mut().insert(
         "Authorization",
-        format!("Bearer {}", api_key)
+        format!("Bearer {api_key}")
             .parse()
             .map_err(|error| format!("failed to encode direct voice authorization header: {error}"))?,
     );
@@ -272,7 +272,7 @@ async fn run_voice_session_inner(
             });
 
             socket
-                .send(Message::Text(session_update.to_string().into()))
+                .send(Message::Text(session_update.to_string()))
                 .await
                 .map_err(|error| format!("failed to initialize direct voice session: {error}"))?;
 
@@ -291,7 +291,7 @@ async fn run_voice_session_inner(
             .map_err(|error| format!("failed to serialize managed voice auth: {error}"))?;
 
             socket
-                .send(Message::Text(auth_json.into()))
+                .send(Message::Text(auth_json))
                 .await
                 .map_err(|error| format!("failed to authenticate managed voice transport: {error}"))?;
 
@@ -324,18 +324,18 @@ async fn run_voice_session_inner(
                         });
 
                         socket
-                            .send(Message::Text(append_message.to_string().into()))
+                            .send(Message::Text(append_message.to_string()))
                             .await
                             .map_err(|error| format!("failed to stream audio chunk: {error}"))?;
                     }
                     Some(VoiceRuntimeCommand::Stop) | None => {
                         if appended_audio {
                             socket
-                                .send(Message::Text(json!({ "type": "input_audio.flush" }).to_string().into()))
+                                .send(Message::Text(json!({ "type": "input_audio.flush" }).to_string()))
                                 .await
                                 .map_err(|error| format!("failed to flush voice audio: {error}"))?;
                             socket
-                                .send(Message::Text(json!({ "type": "input_audio.end" }).to_string().into()))
+                                .send(Message::Text(json!({ "type": "input_audio.end" }).to_string()))
                                 .await
                                 .map_err(|error| format!("failed to end voice audio: {error}"))?;
                         } else {

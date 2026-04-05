@@ -3,9 +3,12 @@ use hstack_core::sync::SyncAction;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::workspace::WorkspaceDelta;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DecodeAnomalyKind {
     AssistantContentIgnored,
+    MultipleToolCallsInSingleTurn,
     ToolInvalidArguments { tool_name: String },
     ToolExecutionFailed { tool_name: String },
     UnknownTool { tool_name: String },
@@ -28,6 +31,16 @@ impl DecodeAnomaly {
             payload: serde_json::json!({
                 "reason": "content_with_tool_calls_has_no_semantic_effect",
                 "content": content,
+            }),
+        }
+    }
+
+    pub fn multiple_tool_calls_in_single_turn(tool_names: Vec<String>) -> Self {
+        Self {
+            kind: DecodeAnomalyKind::MultipleToolCallsInSingleTurn,
+            payload: serde_json::json!({
+                "reason": "multiple_tool_calls_in_single_turn",
+                "tool_names": tool_names,
             }),
         }
     }
@@ -96,9 +109,10 @@ impl DecodeAnomaly {
     pub fn key(&self) -> String {
         match &self.kind {
             DecodeAnomalyKind::AssistantContentIgnored => "assistant_content_ignored".to_string(),
+            DecodeAnomalyKind::MultipleToolCallsInSingleTurn => "agent_runtime".to_string(),
             DecodeAnomalyKind::ToolInvalidArguments { tool_name }
             | DecodeAnomalyKind::ToolExecutionFailed { tool_name }
-            | DecodeAnomalyKind::UnknownTool { tool_name } => format!("tool_error:{}", tool_name),
+            | DecodeAnomalyKind::UnknownTool { tool_name } => format!("tool_error:{tool_name}"),
             DecodeAnomalyKind::NonActionableAssistantContent
             | DecodeAnomalyKind::NoActionableModelOutput
             | DecodeAnomalyKind::MultipleDecodeAnomalies => "agent_runtime".to_string(),
@@ -111,6 +125,7 @@ impl DecodeAnomaly {
 /// A turn either yields a valid action to apply or a structural anomaly to record.
 /// Raw provider output never has semantic effect on its own.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum DecodedTurn {
     Action(AgentAction),
     Anomaly(DecodeAnomaly),
@@ -128,9 +143,12 @@ pub enum WorkingMemoryDelta {
 /// The "action" function `a` produced by the agent.
 /// It represents the intent to transition the state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum AgentAction {
     /// Update short-term context.
     UpdateWorkingMemory(WorkingMemoryDelta),
+    /// Update the typed workspace, including dock and apps.
+    UpdateWorkspace(WorkspaceDelta),
     /// Propose changes to the long-term stack (requires safety control).
     /// Uses the canonical SyncAction from hstack-core.
     UpdateStack(SyncAction),

@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 
 use crate::action::{AgentAction, WorkingMemoryDelta};
 use crate::error::Error;
-use crate::memory::HStackWorld;
+use crate::memory::{HStackWorld, WorkingMemory};
 use crate::tool::Tool;
+use crate::workspace::WorkspaceDelta;
 
 #[op2(fast)]
 fn op_lc_add(a: f64, b: f64) -> f64 {
@@ -248,19 +249,19 @@ fn classify_oom(message: &str) -> bool {
 
 fn run_light_compute(code: &str, input: Value, limits: LightComputeLimits) -> Result<LightComputeOutput, Error> {
     if code.len() > limits.max_code_bytes {
-        return Err(Error::Internal(format!(
+        return Err(Error::Sandbox(format!(
             "light_compute code exceeds {} bytes",
             limits.max_code_bytes
         )));
     }
     if let Some(reason) = forbidden_construct_reason(code) {
-        return Err(Error::Internal(format!("light_compute rejected source: {reason}")));
+        return Err(Error::Sandbox(format!("light_compute rejected source: {reason}")));
     }
 
     let input_json = serde_json::to_string(&input)
-        .map_err(|e| Error::Internal(format!("Failed to serialize light_compute input: {e}")))?;
+        .map_err(|e| Error::Serialization(format!("Failed to serialize light_compute input: {e}")))?;
     if input_json.len() > limits.max_input_bytes {
-        return Err(Error::Internal(format!(
+        return Err(Error::Sandbox(format!(
             "light_compute input exceeds {} bytes",
             limits.max_input_bytes
         )));
@@ -292,12 +293,12 @@ fn run_light_compute(code: &str, input: Value, limits: LightComputeLimits) -> Re
 
     runtime
         .execute_script("light_compute_bootstrap.js", LIGHT_COMPUTE_BOOTSTRAP)
-        .map_err(|e| Error::Internal(format!("light_compute bootstrap error: {e}")))?;
+        .map_err(|e| Error::Invariant(format!("light_compute bootstrap error: {e}")))?;
 
     let wrapped = format!(
         "(() => {{\n  const input = JSON.parse({input_literal});\n  const __result = (() => {{\n{code}\n  }})();\n  return JSON.stringify(__result === undefined ? null : __result);\n}})()",
         input_literal = serde_json::to_string(&input_json)
-            .map_err(|e| Error::Internal(format!("Failed to encode light_compute input literal: {e}")))?,
+            .map_err(|e| Error::Serialization(format!("Failed to encode light_compute input literal: {e}")))?,
         code = code,
     );
 
@@ -317,9 +318,9 @@ fn run_light_compute(code: &str, input: Value, limits: LightComputeLimits) -> Re
     let global = executed.map_err(|e| {
         let msg = e.to_string();
         if classify_oom(&msg) {
-            Error::Internal(format!("light_compute out of memory: {msg}"))
+            Error::Sandbox(format!("light_compute out of memory: {msg}"))
         } else {
-            Error::Internal(format!("light_compute execution error: {msg}"))
+            Error::Sandbox(format!("light_compute execution error: {msg}"))
         }
     })?;
 
@@ -329,14 +330,14 @@ fn run_light_compute(code: &str, input: Value, limits: LightComputeLimits) -> Re
         local.to_rust_string_lossy(scope)
     };
     if json_payload.len() > limits.max_output_bytes {
-        return Err(Error::Internal(format!(
+        return Err(Error::Sandbox(format!(
             "light_compute output exceeds {} bytes",
             limits.max_output_bytes
         )));
     }
 
     let result = serde_json::from_str::<Value>(&json_payload)
-        .map_err(|e| Error::Internal(format!("light_compute returned non-JSON result: {e}")))?;
+        .map_err(|e| Error::Serialization(format!("light_compute returned non-JSON result: {e}")))?;
 
     Ok(LightComputeOutput {
         result,
@@ -392,21 +393,30 @@ impl Tool for LightComputeTool {
         })
     }
 
-    async fn execute(&self, args: Value, _world: &dyn HStackWorld) -> Result<AgentAction, Error> {
+    async fn execute(&self, args: Value, _world: &dyn HStackWorld, _memory: &WorkingMemory) -> Result<AgentAction, Error> {
         let code = args
             .get("code")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| Error::Internal("light_compute requires non-empty 'code'".to_string()))?
+            .ok_or_else(|| Error::Provider("light_compute requires non-empty 'code'".to_string()))?
             .to_string();
 
-        let input = args.get("input").cloned().unwrap_or(Value::Null);
+        let input = match args.get("input") {
+            None => Value::Null,
+            Some(Value::Object(map)) => Value::Object(map.clone()),
+            Some(Value::Null) => Value::Null,
+            Some(_) => {
+                return Err(Error::Provider(
+                    "light_compute 'input' must be an object when provided".to_string(),
+                ))
+            }
+        };
         let limits = self.limits;
 
         let output_res = tokio::task::spawn_blocking(move || run_light_compute(&code, input, limits))
             .await
-            .map_err(|e| Error::Internal(format!("light_compute join error: {e}")));
+            .map_err(|e| Error::Invariant(format!("light_compute join error: {e}")));
 
         let event = match output_res {
             Ok(Ok(output)) if output.timed_out => serde_json::json!({
@@ -470,8 +480,26 @@ impl Tool for LightComputeTool {
             }
         };
 
-        Ok(AgentAction::UpdateWorkingMemory(
-            WorkingMemoryDelta::AddTechnicalNoise("light_compute".to_string(), event),
-        ))
+        let summary = if event.get("ok").and_then(Value::as_bool) == Some(true) {
+            "light_compute success".to_string()
+        } else {
+            event
+                .get("error")
+                .and_then(|error| error.get("type"))
+                .and_then(Value::as_str)
+                .map(|kind| format!("light_compute {kind}"))
+                .unwrap_or_else(|| "light_compute runtime".to_string())
+        };
+
+        Ok(AgentAction::Compound(vec![
+            AgentAction::UpdateWorkingMemory(WorkingMemoryDelta::AddTechnicalNoise(
+                "light_compute".to_string(),
+                event.clone(),
+            )),
+            AgentAction::UpdateWorkspace(WorkspaceDelta::RecordCompute {
+                summary,
+                payload: event,
+            }),
+        ]))
     }
 }

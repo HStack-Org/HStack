@@ -107,14 +107,14 @@ pub fn reconcile_state(base_tickets: &[Ticket], pending_actions: Vec<SyncAction>
                         None => true,
                         Some(t) => {
                             // Check if the base state matches the intended update
-                            let status_matches = action.status.as_ref().map_or(true, |s| s == &t.status);
-                            let notes_matches = action.notes.as_ref().map_or(true, |n| {
+                            let status_matches = action.status.as_ref().is_none_or(|s| s == &t.status);
+                            let notes_matches = action.notes.as_ref().is_none_or(|n| {
                                 let norm_action = if n.is_empty() { None } else { Some(n.clone()) };
                                 let norm_base = t.notes.as_ref().filter(|s| !s.is_empty()).cloned();
                                 norm_action == norm_base
                             });
                             
-                            let payload_matches = action.payload.as_ref().map_or(true, |p| match p {
+                            let payload_matches = action.payload.as_ref().is_none_or(|p| match p {
                                 TicketPayload::Generic(value) => value
                                     .as_object()
                                     .map(|updates| t.payload.matches_partial_update(updates))
@@ -238,7 +238,7 @@ pub fn calculate_state_hash(tasks: &[Ticket]) -> Result<String, Error> {
     let result = hasher.finalize();
 
     // 5. Hex encode
-    Ok(format!("{:x}", result))
+    Ok(format!("{result:x}"))
 }
 
 #[cfg(test)]
@@ -355,7 +355,7 @@ mod tests {
                 assert_eq!(status, &None);
                 assert_eq!(priority, &None);
             }
-            other => panic!("expected event payload, got {:?}", other),
+            other => panic!("expected event payload, got {other:?}"),
         }
     }
 
@@ -458,7 +458,7 @@ mod tests {
                 assert_eq!(priority, &None);
                 assert_eq!(completed, &None);
             }
-            other => panic!("expected event payload, got {:?}", other),
+            other => panic!("expected event payload, got {other:?}"),
         }
     }
 }

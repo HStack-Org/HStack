@@ -110,7 +110,7 @@ pub async fn generate_openai_content(
                 headers.insert(reqwest::header::AUTHORIZATION, val);
             }
             Err(e) => {
-                return Err(Error::Header(format!("Invalid API key format: {}", e)));
+                return Err(Error::Header(format!("Invalid API key format: {e}")));
             }
         }
     }
@@ -134,7 +134,7 @@ pub async fn generate_openai_content(
             Err(_) => "Could not read error body".to_string(),
         };
         debug!(status, body = %body, "OpenAI-compatible API returned an error response");
-        return Err(Error::Provider(format!("API error (status {}): {}", status, body)));
+        return Err(Error::Api { status, body });
     }
 
     let response_data_result: Result<OpenAiChatResponse, reqwest::Error> = response.json().await;
@@ -142,13 +142,13 @@ pub async fn generate_openai_content(
         Ok(data) => data,
         Err(e) => {
             debug!(error = %e, "failed to parse OpenAI-compatible response body");
-            return Err(Error::Internal(format!("Failed to parse response: {}", e)));
+            return Err(Error::ProviderContract(format!("Malformed provider response: {e}")));
         }
     };
 
     let mut choices = response_data.choices;
     if choices.is_empty() {
-        return Err(Error::Provider("API returned empty choices".to_string()));
+        return Err(Error::ProviderContract("API returned empty choices".to_string()));
     }
 
     let msg = choices.remove(0).message;

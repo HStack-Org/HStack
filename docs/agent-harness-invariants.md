@@ -4,6 +4,9 @@ This document describes the formal behavioral contract of the `hstack-agent` har
 It is intentionally stricter than ordinary prompt guidance. These are semantic rules
 for the runtime, not style preferences for model output.
 
+For the higher-level workspace, app, dock, and viewport model that should eventually
+govern context construction, see `docs/agent-workspace-viewport-spec.md`.
+
 ## Core Model
 
 Let:
@@ -44,12 +47,22 @@ The harness is action-based.
 - User-visible completion requires a terminal action.
 - In the current implementation, terminal completion is produced by the `identity` tool,
   which returns `AgentAction::Stop(answer)`.
+- Every user query must terminate with a reply. An explicit empty reply is valid; an absent
+    reply is not.
+- In the ordinary success path, the runtime itself must not fabricate that reply.
+- After structural non-progress, the host may apply a deterministic terminal fallback reply by
+    policy rather than returning an error or looping forever.
 
 Corollary: assistant text without a valid terminal action is not a user reply.
 
 ## What Counts As Progress
 
 Progress means a validated transition in the action algebra.
+
+Because the harness transition is step-based, a single provider step may decode to at most
+one provider-originated tool call. Any response containing multiple tool calls is structurally
+invalid: later calls are not grounded in the post-state of earlier calls because the model has
+not yet observed their results.
 
 Examples of valid progress:
 
@@ -62,6 +75,7 @@ Examples of non-progress:
 - plain assistant narration with no tool call
 - malformed tool arguments
 - unknown tool names
+- multiple tool calls in a single provider response
 - empty provider output
 
 Non-progress events may still be recorded as technical/runtime anomalies.
@@ -86,8 +100,12 @@ The harness must fail structurally rather than invent semantics.
 - Unknown tools are errors.
 - Empty or non-actionable assistant content is an anomaly, not completion.
 
-The runtime may continue after these anomalies if policy allows, but it must not
-convert them into fabricated prose or implicit success.
+The terminal `identity.answer` field must be present, but it may be an empty string when
+the agent terminates with an explicit empty reply.
+
+The runtime may continue after these anomalies if policy allows, or it may invoke
+deterministic host terminalization. It must not treat provider prose itself as
+implicit success.
 
 ## Proof Obligations
 
@@ -98,5 +116,11 @@ The following behaviors must be covered by tests:
 3. Malformed tool arguments do not execute the tool.
 4. The terminal answer must come from an explicit terminal action.
 5. Missing `identity.answer` is rejected rather than defaulted.
+6. A query that hits the max-iteration policy must still terminate with a reply.
+7. If forced terminalization fails to decode a valid identity action, the host must emit the
+    deterministic terminal fallback instead of returning a protocol-level failure.
 
 Those tests live in `crates/hstack-agent/src/tests.rs` and should be kept aligned with this document.
+
+For machine-checkable proofs of the terminal-action contract, see `crates/hstack-agent/src/formal.rs`
+and `docs/formal-verification.md`.

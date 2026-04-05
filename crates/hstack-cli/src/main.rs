@@ -1,4 +1,14 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::panic,
+        clippy::panic_in_result_fn,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable
+    )
+)]
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -14,9 +24,11 @@ use hstack_agent::{
     manager::SimpleContextManager,
     memory::{HStackWorld, WorkingMemory},
     provider::{GeminiProvider, OpenAiProvider},
+    workspace::{short_term_messages, workspace_runtime_snapshot, AllocationPlan, AppId},
     build_base_prompt, Agent, AgentControlSystem, AgentProgressUpdate, AgentPromptProfile,
 };
 use hstack_core::provider::{Message, ProviderConfig, ProviderKind, Role};
+use hstack_core::stack_snapshot::StackSnapshot;
 use hstack_core::sync::SyncAction;
 use hstack_core::ticket::Ticket;
 use ratatui::{
@@ -33,13 +45,11 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::stdout;
-use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 const SERVICE_NAME: &str = "hstack-llm-service";
 const DESKTOP_BUNDLE_ACCOUNT: &str = "hstack-secure-store-v1";
-const WORLD_FILE: &str = "cli-world.json";
 const SETTINGS_FILE: &str = "settings.json";
 
 fn get_app_identifier() -> String {
@@ -56,14 +66,13 @@ fn load_provider_config() -> Result<(ProviderConfig, Option<String>)> {
 
     if !settings_path.exists() {
         return Err(anyhow::anyhow!(
-            "No settings file found at {:?}. Set HSTACK_APP_ID env var if using a different app identifier.",
-            settings_path
+            "No settings file found at {settings_path:?}. Set HSTACK_APP_ID env var if using a different app identifier."
         ));
     }
 
     let settings: hstack_core::settings::UserSettings = {
         let content = std::fs::read_to_string(&settings_path)
-            .with_context(|| format!("Failed to read settings file: {:?}", settings_path))?;
+            .with_context(|| format!("Failed to read settings file: {settings_path:?}"))?;
         let json: serde_json::Value = serde_json::from_str(&content)
             .with_context(|| "Failed to parse settings file as JSON")?;
 
@@ -80,7 +89,7 @@ fn load_provider_config() -> Result<(ProviderConfig, Option<String>)> {
         .ok_or_else(|| anyhow::anyhow!("No active provider configured in settings"))?;
 
     let entry = keyring::Entry::new(SERVICE_NAME, DESKTOP_BUNDLE_ACCOUNT)
-        .map_err(|e| anyhow::anyhow!("OS Keychain access error: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("OS Keychain access error: {e}"))?;
 
     let raw = match entry.get_password() {
         Ok(raw) => raw,
@@ -89,11 +98,11 @@ fn load_provider_config() -> Result<(ProviderConfig, Option<String>)> {
                 "No credentials found in keychain. Please set up hstack-open first."
             ))
         }
-        Err(e) => return Err(anyhow::anyhow!("Failed to retrieve from keychain: {}", e)),
+        Err(e) => return Err(anyhow::anyhow!("Failed to retrieve from keychain: {e}")),
     };
 
     let entries: HashMap<String, String> = serde_json::from_str(&raw)
-        .map_err(|e| anyhow::anyhow!("Failed to parse keychain data: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse keychain data: {e}"))?;
 
     let api_key = entries.get(&saved_provider.id).cloned().unwrap_or_default();
 
@@ -121,68 +130,12 @@ fn load_provider_config() -> Result<(ProviderConfig, Option<String>)> {
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 struct FileBackedWorld {
     tickets: Vec<Ticket>,
-    #[serde(skip)]
-    file_path: Option<PathBuf>,
-}
-
-impl FileBackedWorld {
-    fn load() -> Result<Self> {
-        let path = Self::world_file_path()?;
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read world file: {:?}", path))?;
-            let mut world: Self = serde_json::from_str(&content)
-                .with_context(|| "Failed to parse world file")?;
-            world.file_path = Some(path);
-            Ok(world)
-        } else {
-            let mut world = Self::default();
-            world.file_path = Some(path);
-            Ok(world)
-        }
-    }
-
-    fn save(&self) -> Result<()> {
-        if let Some(ref path) = self.file_path {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let content = serde_json::to_string_pretty(&self)?;
-            std::fs::write(path, content)?;
-        }
-        Ok(())
-    }
-
-    fn world_file_path() -> Result<PathBuf> {
-        let data_dir = dirs::data_dir()
-            .or_else(dirs::home_dir)
-            .ok_or_else(|| anyhow::anyhow!("Could not find data directory"))?;
-
-        let app_id = get_app_identifier();
-        Ok(data_dir.join(app_id).join(WORLD_FILE))
-    }
 }
 
 #[async_trait::async_trait]
 impl HStackWorld for FileBackedWorld {
-    async fn get_tickets(&self) -> Result<Vec<Ticket>, String> {
-        Ok(self.tickets.clone())
-    }
-
-    async fn search_tickets(&self, query: &str) -> Result<Vec<Ticket>, String> {
-        let query = query.to_lowercase();
-        Ok(self
-            .tickets
-            .iter()
-            .filter(|t| {
-                t.title.to_lowercase().contains(&query)
-                    || t.notes
-                        .as_ref()
-                        .map(|n| n.to_lowercase().contains(&query))
-                        .unwrap_or(false)
-            })
-            .cloned()
-            .collect())
+    async fn get_stack_snapshot(&self) -> Result<StackSnapshot, String> {
+        Ok(StackSnapshot::new(self.tickets.clone(), Vec::new()))
     }
 }
 
@@ -211,9 +164,9 @@ impl AgentControlSystem for CapturingControl {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Panel {
     Stack,
-    Memory,
+    ShortTerm,
     Conversation,
-    Actions,
+    Trace,
 }
 
 struct AppState {
@@ -227,25 +180,171 @@ struct AppState {
     model_name: String,
     // Scroll states
     stack_state: ListState,
-    memory_state: ListState,
-    actions_state: ListState,
+    short_term_state: ListState,
+    trace_state: ListState,
     conv_scroll: u16,
     focused_panel: Panel,
 }
 
 impl AppState {
-    fn extract_memory_lines(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        for msg in &self.working_memory.messages {
-            let content = msg.content.clone().unwrap_or_default();
-            if !content.trim().is_empty() {
-                lines.push(format!("[{:?}] {}", msg.role, content));
+    fn projected_tickets(&self) -> Vec<Ticket> {
+        StackSnapshot::new(self.world.tickets.clone(), Vec::new())
+            .projected_agent_tickets(&self.working_memory.proposed_stack_actions)
+    }
+
+    fn short_term_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            "policy: v1_last_user_goal_pinned".to_string(),
+            "guarantee: latest user message remains mounted even under pressure".to_string(),
+        ];
+
+        for message in short_term_messages(&self.working_memory) {
+            let role = match message.role {
+                Role::System => "system",
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
+            };
+
+            let content = message.content.unwrap_or_default();
+            if content.trim().is_empty() {
+                continue;
+            }
+
+            let mut content_lines = content.lines();
+            if let Some(first) = content_lines.next() {
+                lines.push(format!("{role}: {first}"));
+            }
+            for line in content_lines {
+                lines.push(format!("  {line}"));
             }
         }
-        for noise in &self.working_memory.technical_noise {
-            lines.push(format!("[tool] {}", noise));
+
+        if lines.len() == 2 {
+            lines.push("- empty".to_string());
         }
+
         lines
+    }
+
+    fn allocation_plan(&self) -> AllocationPlan {
+        let mut workspace = self.working_memory.workspace.clone();
+        workspace.refresh_near_events(&self.world.tickets);
+        workspace.materialize_allocation_plan()
+    }
+
+    fn runtime_snapshot_lines(&self) -> Vec<String> {
+        let snapshot = workspace_runtime_snapshot(&self.working_memory);
+        serde_json::to_string_pretty(&snapshot)
+            .unwrap_or_else(|_| snapshot.to_string())
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn trace_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!("runtime_status: {}", self.runtime_status.as_deref().unwrap_or("idle"))];
+
+        lines.push(format!("sync_actions: {}", self.working_memory.proposed_stack_actions.len()));
+        if self.working_memory.proposed_stack_actions.is_empty() {
+            lines.push("  - none".to_string());
+        } else {
+            for action in &self.working_memory.proposed_stack_actions {
+                let mut line = format!(
+                    "  - {:?} {} {}",
+                    action.r#type,
+                    action.entity_type,
+                    truncate_id(&action.entity_id)
+                );
+                if let Some(status) = &action.status {
+                    line.push_str(&format!(" status={status:?}"));
+                }
+                lines.push(line);
+            }
+        }
+
+        lines.push(String::new());
+        lines.push(format!("technical_noise: {}", self.working_memory.technical_noise.len()));
+        if self.working_memory.technical_noise.is_empty() {
+            lines.push("  - none".to_string());
+        } else {
+            for (index, entry) in self.working_memory.technical_noise.iter().enumerate() {
+                lines.push(format!("  [{index}]"));
+                let pretty = serde_json::to_string_pretty(entry).unwrap_or_else(|_| entry.to_string());
+                for trace_line in pretty.lines() {
+                    lines.push(format!("    {trace_line}"));
+                }
+            }
+        }
+
+        lines
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UiLayout {
+    header: Rect,
+    stack: Rect,
+    short_term: Rect,
+    dock: Rect,
+    near_events: Rect,
+    snapshot: Rect,
+    apps: Rect,
+    conversation: Rect,
+    trace: Rect,
+    input: Rect,
+}
+
+fn compute_layout(size: Rect) -> UiLayout {
+    let root = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(12),
+            Constraint::Length(3),
+        ])
+        .split(size);
+
+    let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(root[1]);
+
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(26),
+            Constraint::Percentage(30),
+            Constraint::Percentage(44),
+        ])
+        .split(body[0]);
+
+    let workspace = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(18),
+            Constraint::Percentage(18),
+            Constraint::Percentage(24),
+            Constraint::Min(8),
+        ])
+        .split(top[2]);
+
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(body[1]);
+
+    UiLayout {
+        header: root[0],
+        stack: top[0],
+        short_term: top[1],
+        dock: workspace[0],
+        near_events: workspace[1],
+        snapshot: workspace[2],
+        apps: workspace[3],
+        conversation: bottom[0],
+        trace: bottom[1],
+        input: root[2],
     }
 }
 
@@ -270,7 +369,7 @@ enum AgentResult {
 #[tokio::main]
 async fn main() -> Result<()> {
     let (provider_config, model) = load_provider_config()?;
-    let world = FileBackedWorld::load()?;
+    let world = FileBackedWorld::default();
 
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -290,8 +389,8 @@ async fn main() -> Result<()> {
         world,
         model_name,
         stack_state: ListState::default(),
-        memory_state: ListState::default(),
-        actions_state: ListState::default(),
+        short_term_state: ListState::default(),
+        trace_state: ListState::default(),
         conv_scroll: 0,
         focused_panel: Panel::Conversation,
     };
@@ -301,10 +400,6 @@ async fn main() -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
-
-    if let Err(e) = app.world.save() {
-        eprintln!("Warning: failed to save world: {}", e);
-    }
 
     res
 }
@@ -328,31 +423,30 @@ where
                 app.is_thinking = false;
                 match result {
                     AgentResult::Progress { iteration, phase, memory } => {
-                        app.runtime_status = Some(format!("iteration {} • {}", iteration, phase));
+                        app.runtime_status = Some(format!("iteration {iteration} • {phase}"));
                         app.working_memory = memory;
+                        app.proposed_actions = app.working_memory.proposed_stack_actions.clone();
                     }
                     AgentResult::Success { answer, deltas, memory, world } => {
                         app.runtime_status = Some("completed".to_string());
-                        if !answer.trim().is_empty() {
-                            app.messages.push(("Agent".to_string(), answer));
-                        }
-                        app.proposed_actions = deltas.clone();
+                        app.messages.push(("Agent".to_string(), answer));
                         app.working_memory = memory;
+                        app.proposed_actions = app.working_memory.proposed_stack_actions.clone();
                         app.world = world;
                         
                         for action in &deltas {
                             let _ = apply_action_to_world(&mut app.world, action);
                         }
-                        if !deltas.is_empty() {
-                            let _ = app.world.save();
-                        }
                         
+                        app.working_memory.proposed_stack_actions.clear();
+                        app.proposed_actions.clear();
+
                         app.conv_scroll = u16::MAX;
                     }
                     AgentResult::Error { error, memory } => {
-                        app.runtime_status = Some(format!("runtime error • {}", error));
-                        // Important: Save the trace so you can see where it looped/failed
-                        app.working_memory = memory; 
+                        app.runtime_status = Some(format!("agent failure • {error}"));
+                        app.working_memory = memory;
+                        app.proposed_actions = app.working_memory.proposed_stack_actions.clone();
                         app.conv_scroll = u16::MAX;
                     }
                 }
@@ -361,7 +455,7 @@ where
                 if app.is_thinking {
                     // The background thread died unexpectedly!
                     app.is_thinking = false;
-                    app.runtime_status = Some("runtime error • background task crashed".to_string());
+                    app.runtime_status = Some("internal failure • background task crashed".to_string());
                     app.conv_scroll = u16::MAX;
                 }
             }
@@ -400,10 +494,10 @@ where
                         }
                         KeyCode::Tab => {
                             app.focused_panel = match app.focused_panel {
-                                Panel::Stack => Panel::Memory,
-                                Panel::Memory => Panel::Conversation,
-                                Panel::Conversation => Panel::Actions,
-                                Panel::Actions => Panel::Stack,
+                                Panel::Stack => Panel::ShortTerm,
+                                Panel::ShortTerm => Panel::Conversation,
+                                Panel::Conversation => Panel::Trace,
+                                Panel::Trace => Panel::Stack,
                             };
                         }
                         KeyCode::Enter => {
@@ -415,7 +509,7 @@ where
                                 app.runtime_status = Some("thinking".to_string());
                                 app.conv_scroll = u16::MAX; // Jump to bottom instantly
 
-                                app.working_memory.messages.push(Message {
+                                app.working_memory.push_message(Message {
                                     role: Role::User,
                                     content: Some(input),
                                     tool_calls: None,
@@ -425,7 +519,7 @@ where
 
                                 let config_clone = provider_config.clone();
                                 let mut memory_clone = app.working_memory.clone();
-                                let mut world_clone = app.world.clone();
+                                let world_clone = app.world.clone();
                                 let tx_clone = tx.clone();
 
                                 tokio::spawn(async move {
@@ -436,16 +530,30 @@ where
 
                                     let tools = match hstack_agent::tool::compose_tools(&[
                                         "identity",
+                                        "follow_up",
                                         "search_stack",
+                                        "create_ticket",
+                                        "delete_ticket",
+                                        "delete_all_tickets",
+                                        "edit_ticket",
+                                        "add_commute",
+                                        "get_directions",
+                                        "remove_commute",
+                                        "start_live_directions",
+                                        "create_countdown",
                                         "scratch_thought",
                                         "exa_search",
                                         "light_compute",
+                                        "manage_app",
+                                        "inspect_app",
+                                        "scratchpad_search",
+                                        "scratchpad_edit",
                                     ]) {
                                         Ok(tools) => tools,
                                         Err(e) => {
                                             let _ = tx_clone
                                                 .send(AgentResult::Error {
-                                                    error: format!("Tool configuration error: {}", e),
+                                                    error: format!("Tool configuration error: {e}"),
                                                     memory: memory_clone,
                                                 });
                                             return;
@@ -461,7 +569,7 @@ where
                                     };
 
                                     let tx_progress = tx_clone.clone();
-                                    match agent.run_with_progress(&mut world_clone, &mut memory_clone, move |update: AgentProgressUpdate| {
+                                    match agent.run_with_progress(&world_clone, &mut memory_clone, move |update: AgentProgressUpdate| {
                                         let _ = tx_progress.send(AgentResult::Progress {
                                             iteration: update.iteration,
                                             phase: update.phase,
@@ -513,33 +621,23 @@ fn handle_mouse_event(app: &mut AppState, mouse: MouseEvent, terminal_size: Rect
 }
 
 fn handle_mouse_click(app: &mut AppState, column: u16, row: u16, terminal_size: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Min(0),
-            Constraint::Length(5),
-            Constraint::Length(3),
-        ])
-        .split(terminal_size);
+    let layout = compute_layout(terminal_size);
 
-    if rect_contains(chunks[1], column, row) {
+    if rect_contains(layout.stack, column, row) {
         app.focused_panel = Panel::Stack;
-    } else if rect_contains(chunks[2], column, row) {
-        app.focused_panel = Panel::Memory;
-    } else if rect_contains(chunks[3], column, row) {
+    } else if rect_contains(layout.short_term, column, row) {
+        app.focused_panel = Panel::ShortTerm;
+    } else if rect_contains(layout.conversation, column, row) {
         app.focused_panel = Panel::Conversation;
-    } else if rect_contains(chunks[4], column, row) {
-        app.focused_panel = Panel::Actions;
+    } else if rect_contains(layout.trace, column, row) {
+        app.focused_panel = Panel::Trace;
     }
 
     let focused_rect = match app.focused_panel {
-        Panel::Stack => chunks[1],
-        Panel::Memory => chunks[2],
-        Panel::Conversation => chunks[3],
-        Panel::Actions => chunks[4],
+        Panel::Stack => layout.stack,
+        Panel::ShortTerm => layout.short_term,
+        Panel::Conversation => layout.conversation,
+        Panel::Trace => layout.trace,
     };
 
     if let Some(is_up_arrow) = hit_scrollbar_arrow(focused_rect, column, row) {
@@ -587,19 +685,19 @@ fn handle_scroll_up(app: &mut AppState) {
                 app.stack_state.select(Some(current.saturating_sub(1)));
             }
         }
-        Panel::Memory => {
-            let current = app.memory_state.selected().unwrap_or(0);
+        Panel::ShortTerm => {
+            let current = app.short_term_state.selected().unwrap_or(0);
             if current > 0 {
-                app.memory_state.select(Some(current.saturating_sub(1)));
+                app.short_term_state.select(Some(current.saturating_sub(1)));
             }
         }
         Panel::Conversation => {
             app.conv_scroll = app.conv_scroll.saturating_sub(1);
         }
-        Panel::Actions => {
-            let current = app.actions_state.selected().unwrap_or(0);
+        Panel::Trace => {
+            let current = app.trace_state.selected().unwrap_or(0);
             if current > 0 {
-                app.actions_state.select(Some(current.saturating_sub(1)));
+                app.trace_state.select(Some(current.saturating_sub(1)));
             }
         }
     }
@@ -614,23 +712,139 @@ fn handle_scroll_down(app: &mut AppState) {
                 app.stack_state.select(Some((current + 1).min(max)));
             }
         }
-        Panel::Memory => {
-            let max = app.extract_memory_lines().len().saturating_sub(1);
-            let current = app.memory_state.selected().unwrap_or(0);
+        Panel::ShortTerm => {
+            let max = app.short_term_lines().len().saturating_sub(1);
+            let current = app.short_term_state.selected().unwrap_or(0);
             if current < max {
-                app.memory_state.select(Some((current + 1).min(max)));
+                app.short_term_state.select(Some((current + 1).min(max)));
             }
         }
         Panel::Conversation => {
             app.conv_scroll = app.conv_scroll.saturating_add(1);
         }
-        Panel::Actions => {
-            let max = app.proposed_actions.len().saturating_sub(1);
-            let current = app.actions_state.selected().unwrap_or(0);
+        Panel::Trace => {
+            let max = app.trace_lines().len().saturating_sub(1);
+            let current = app.trace_state.selected().unwrap_or(0);
             if current < max {
-                app.actions_state.select(Some((current + 1).min(max)));
+                app.trace_state.select(Some((current + 1).min(max)));
             }
         }
+    }
+}
+
+fn truncate_id(id: &str) -> &str {
+    &id[..8.min(id.len())]
+}
+
+fn panel_name(panel: Panel) -> &'static str {
+    match panel {
+        Panel::Stack => "stack",
+        Panel::ShortTerm => "short_term",
+        Panel::Conversation => "conversation",
+        Panel::Trace => "trace",
+    }
+}
+
+fn render_text_panel(
+    f: &mut ratatui::Frame,
+    rect: Rect,
+    title: &str,
+    lines: &[String],
+    border_style: Style,
+) {
+    let text = if lines.is_empty() {
+        "- empty".to_string()
+    } else {
+        lines.join("\n")
+    };
+
+    let paragraph = Paragraph::new(text)
+        .block(Block::default().title(title).borders(Borders::ALL).border_style(border_style))
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(paragraph, rect);
+}
+
+fn render_app_windows(
+    f: &mut ratatui::Frame,
+    rect: Rect,
+    plan: &AllocationPlan,
+    focused_app: AppId,
+) {
+    let apps = &plan.selected_app_contents;
+
+    if apps.is_empty() {
+        render_text_panel(
+            f,
+            rect,
+            " APP WINDOWS ",
+            &["- no mounted app viewport selected".to_string()],
+            Style::default().fg(Color::DarkGray),
+        );
+        return;
+    }
+
+    let outer = Block::default()
+        .title(" APP WINDOWS ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = outer.inner(rect);
+    f.render_widget(outer, rect);
+
+    if inner.width < 4 || inner.height < 4 {
+        return;
+    }
+
+    let rects = match apps.len() {
+        1 => vec![inner],
+        2 => Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner)
+            .to_vec(),
+        _ => {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(inner);
+
+            let mut rects = Vec::new();
+            rects.extend(
+                Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(rows[0])
+                    .to_vec(),
+            );
+            rects.extend(
+                Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(rows[1])
+                    .to_vec(),
+            );
+            rects
+        }
+    };
+
+    for ((app_id, content), app_rect) in apps.iter().zip(rects.into_iter()) {
+        let border = if *app_id == focused_app {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let title = format!(" {} ", app_id.label().to_uppercase());
+        let body = content
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let paragraph = Paragraph::new(body)
+            .block(Block::default().title(title).borders(Borders::ALL).border_style(border))
+            .wrap(Wrap { trim: false });
+        f.render_widget(paragraph, app_rect);
     }
 }
 
@@ -656,7 +870,7 @@ fn estimate_conversation_height(app: &AppState, body_width: u16) -> u16 {
 
     for (role, content) in &app.messages {
         let prefix = if role == "You" { "> You: " } else { "  Agent: " };
-        let rendered = format!("{}{}", prefix, content);
+        let rendered = format!("{prefix}{content}");
         lines = lines.saturating_add(wrapped_line_count(&rendered, body_width));
     }
 
@@ -669,18 +883,12 @@ fn estimate_conversation_height(app: &AppState, body_width: u16) -> u16 {
 
 fn render_ui(f: &mut ratatui::Frame, app: &mut AppState) {
     let size = f.area();
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Percentage(25), // Stack
-            Constraint::Percentage(25), // Working Memory
-            Constraint::Min(0), // Conversation (Flexible)
-            Constraint::Length(5), // Actions
-            Constraint::Length(3), // Input
-        ])
-        .split(size);
+    let layout = compute_layout(size);
+    let plan = app.allocation_plan();
+    let projected_tickets = app.projected_tickets();
+    let short_term_lines = app.short_term_lines();
+    let trace_lines = app.trace_lines();
+    let snapshot_lines = app.runtime_snapshot_lines();
 
     let border_style = |panel: Panel| -> Style {
         if app.focused_panel == panel {
@@ -692,14 +900,21 @@ fn render_ui(f: &mut ratatui::Frame, app: &mut AppState) {
 
     // Header
     let status = app.runtime_status.as_deref().unwrap_or("idle");
-    let header_text = format!(" hstack-cli • {} • {} • ctrl+c: quit • Tab: switch panel ", app.model_name, status);
+    let header_text = format!(
+        " hstack-cli • {} • {} • ui_focus={} • dock_focus={} • mounted={} • ctrl+c: quit • Tab: switch panel ",
+        app.model_name,
+        status,
+        panel_name(app.focused_panel),
+        app.working_memory.workspace.dock.focused_app.label(),
+        app.working_memory.workspace.dock.mounted_apps.len(),
+    );
     let header = Paragraph::new(header_text)
         .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)))
         .style(Style::default().fg(Color::Cyan));
-    f.render_widget(header, chunks[0]);
+    f.render_widget(header, layout.header);
 
     // Stack
-    let stack_items: Vec<ListItem> = app.world.tickets.iter().map(|t| {
+    let stack_items: Vec<ListItem> = projected_tickets.iter().map(|t| {
         let status_color = match t.status {
             hstack_core::ticket::TicketStatus::Completed => Color::Green,
             hstack_core::ticket::TicketStatus::InFocus => Color::Yellow,
@@ -719,34 +934,75 @@ fn render_ui(f: &mut ratatui::Frame, app: &mut AppState) {
         .block(Block::default().title(" STACK ").borders(Borders::ALL).border_style(border_style(Panel::Stack)))
         .highlight_style(Style::default().bg(Color::DarkGray));
 
-    f.render_stateful_widget(stack_list, chunks[1], &mut app.stack_state);
+    f.render_stateful_widget(stack_list, layout.stack, &mut app.stack_state);
 
-    let mut stack_scroll_state = ScrollbarState::new(app.world.tickets.len())
+    let mut stack_scroll_state = ScrollbarState::new(projected_tickets.len())
         .position(app.stack_state.selected().unwrap_or(0));
     f.render_stateful_widget(
         Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight).begin_symbol(Some("↑")).end_symbol(Some("↓")),
-        chunks[1].inner(Margin { vertical: 1, horizontal: 0 }),
+        layout.stack.inner(Margin { vertical: 1, horizontal: 0 }),
         &mut stack_scroll_state,
     );
 
-    // Working Memory
-    let memory_lines = app.extract_memory_lines();
-    let memory_items: Vec<ListItem> = memory_lines.iter().map(|line| {
+    // Short-term kernel
+    let short_term_items: Vec<ListItem> = short_term_lines.iter().map(|line| {
         ListItem::new(Span::styled(line, Style::default().fg(Color::DarkGray)))
     }).collect();
 
-    let memory_list = List::new(memory_items)
-        .block(Block::default().title(" WORKING MEMORY ").borders(Borders::ALL).border_style(border_style(Panel::Memory)))
+    let short_term_list = List::new(short_term_items)
+        .block(Block::default().title(" SHORT-TERM KERNEL ").borders(Borders::ALL).border_style(border_style(Panel::ShortTerm)))
         .highlight_style(Style::default().bg(Color::DarkGray));
 
-    f.render_stateful_widget(memory_list, chunks[2], &mut app.memory_state);
+    f.render_stateful_widget(short_term_list, layout.short_term, &mut app.short_term_state);
 
-    let mut memory_scroll_state = ScrollbarState::new(memory_lines.len())
-        .position(app.memory_state.selected().unwrap_or(0));
+    let mut short_term_scroll_state = ScrollbarState::new(short_term_lines.len())
+        .position(app.short_term_state.selected().unwrap_or(0));
     f.render_stateful_widget(
         Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight).begin_symbol(Some("↑")).end_symbol(Some("↓")),
-        chunks[2].inner(Margin { vertical: 1, horizontal: 0 }),
-        &mut memory_scroll_state,
+        layout.short_term.inner(Margin { vertical: 1, horizontal: 0 }),
+        &mut short_term_scroll_state,
+    );
+
+    // Workspace regions
+    let dock_lines = plan
+        .dock_content
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    render_text_panel(
+        f,
+        layout.dock,
+        " DOCK ",
+        &dock_lines,
+        Style::default().fg(Color::DarkGray),
+    );
+
+    let near_event_lines = plan
+        .near_event_content
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    render_text_panel(
+        f,
+        layout.near_events,
+        " NEAR EVENTS ",
+        &near_event_lines,
+        Style::default().fg(Color::DarkGray),
+    );
+
+    render_text_panel(
+        f,
+        layout.snapshot,
+        " WORKSPACE SNAPSHOT ",
+        &snapshot_lines,
+        Style::default().fg(Color::DarkGray),
+    );
+
+    render_app_windows(
+        f,
+        layout.apps,
+        &plan,
+        app.working_memory.workspace.dock.focused_app,
     );
 
     // Conversation
@@ -763,7 +1019,7 @@ fn render_ui(f: &mut ratatui::Frame, app: &mut AppState) {
     }
 
     // CLAMP SCROLLING LOGIC
-    let conv_inner = chunks[3].inner(Margin { vertical: 1, horizontal: 1 });
+    let conv_inner = layout.conversation.inner(Margin { vertical: 1, horizontal: 1 });
     let content_lines = estimate_conversation_height(app, conv_inner.width.max(1));
     let visible_height = conv_inner.height;
     let max_scroll = content_lines.saturating_sub(visible_height);
@@ -776,42 +1032,39 @@ fn render_ui(f: &mut ratatui::Frame, app: &mut AppState) {
         .wrap(Wrap { trim: true })
         .scroll((app.conv_scroll, 0));
 
-    f.render_widget(conv_paragraph, chunks[3]);
+    f.render_widget(conv_paragraph, layout.conversation);
 
     let mut conv_scroll_state = ScrollbarState::new(content_lines.into())
         .position(app.conv_scroll as usize);
     f.render_stateful_widget(
         Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight).begin_symbol(Some("↑")).end_symbol(Some("↓")),
-        chunks[3].inner(Margin { vertical: 1, horizontal: 0 }),
+        layout.conversation.inner(Margin { vertical: 1, horizontal: 0 }),
         &mut conv_scroll_state,
     );
 
-    // Proposed Actions
-    let action_items: Vec<ListItem> = app.proposed_actions.iter().map(|a| {
-        ListItem::new(Line::from(vec![
-            Span::styled(format!("• {:?}", a.r#type), Style::default().fg(Color::Yellow)),
-            Span::styled(format!(" {} ({})", &a.entity_id[..8.min(a.entity_id.len())], a.entity_type), Style::default().fg(Color::White)),
-        ]))
+    // Trace
+    let trace_items: Vec<ListItem> = trace_lines.iter().map(|line| {
+        ListItem::new(Span::styled(line, Style::default().fg(Color::DarkGray)))
     }).collect();
 
-    let actions_list = List::new(action_items)
-        .block(Block::default().title(" PROPOSED ACTIONS ").borders(Borders::ALL).border_style(border_style(Panel::Actions)))
+    let trace_list = List::new(trace_items)
+        .block(Block::default().title(" TRACE ").borders(Borders::ALL).border_style(border_style(Panel::Trace)))
         .highlight_style(Style::default().bg(Color::DarkGray));
 
-    f.render_stateful_widget(actions_list, chunks[4], &mut app.actions_state);
+    f.render_stateful_widget(trace_list, layout.trace, &mut app.trace_state);
 
-    let mut actions_scroll_state = ScrollbarState::new(app.proposed_actions.len())
-        .position(app.actions_state.selected().unwrap_or(0));
+    let mut trace_scroll_state = ScrollbarState::new(trace_lines.len())
+        .position(app.trace_state.selected().unwrap_or(0));
     f.render_stateful_widget(
         Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight).begin_symbol(Some("↑")).end_symbol(Some("↓")),
-        chunks[4].inner(Margin { vertical: 1, horizontal: 0 }),
-        &mut actions_scroll_state,
+        layout.trace.inner(Margin { vertical: 1, horizontal: 0 }),
+        &mut trace_scroll_state,
     );
 
     // Input Box
     let input_text = format!("> {}", app.input_buffer);
     let input = Paragraph::new(input_text).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::White)));
-    f.render_widget(input, chunks[5]);
+    f.render_widget(input, layout.input);
 }
 
 fn apply_action_to_world(world: &mut FileBackedWorld, action: &SyncAction) -> Result<()> {
@@ -821,7 +1074,7 @@ fn apply_action_to_world(world: &mut FileBackedWorld, action: &SyncAction) -> Re
     match action.r#type {
         SyncActionType::Create => {
             let ticket = Ticket {
-                id: Uuid::new_v4().to_string(),
+                id: action.entity_id.clone(),
                 title: format!("{:?} - {}", action.entity_type, &action.entity_id[..8.min(action.entity_id.len())]),
                 r#type: hstack_core::ticket::TicketType::Task,
                 status: hstack_core::ticket::TicketStatus::Idle,

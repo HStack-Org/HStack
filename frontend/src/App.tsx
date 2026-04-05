@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { SyncProvider, TicketModel } from "./SyncEngine";
+import { projectTickets, type SyncAction } from "./ticketPresentation";
 import { useSync } from "./useSync";
-import { Send, ChevronDown, Plus, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ChevronUp, ExternalLink, Mic, Square } from "lucide-react";
+import { Send, ChevronDown, Plus, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ChevronUp, ExternalLink, Mic, Square, Check, X } from "lucide-react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -494,7 +495,7 @@ const ScopeBlock = ({ label, type, children }: ScopeBlockProps) => {
     return (<div className="flex flex-col mb-4"><div className="pl-[2.5px] mb-1 flex items-center h-4"><span className={cn("text-[10px] font-bold uppercase tracking-[1.5px] whitespace-nowrap", isWeek ? "text-[#3B82F6]" : "text-white/30")}>{label}</span></div><div className="flex gap-2"><div className="shrink-0 pl-[4px]"><div className={cn("w-[1.5px] h-full transition-all duration-300", isWeek ? "bg-[#3B82F6]" : "bg-white/10")} /></div><div className="flex-1 flex flex-col gap-4">{children}</div></div></div>);
 };
 
-const TicketCard = ({ ticket, savedLocations }: { ticket: TicketModel; savedLocations: SavedLocationIndex }) => {
+const TicketCard = ({ ticket, savedLocations, isProposed }: { ticket: TicketModel; savedLocations: SavedLocationIndex; isProposed?: boolean }) => {
     const [isExpanded, setIsExpanded] = useState(false);
   const payload = ticket.payload || {};
     const isCompleted = payload.completed === true;
@@ -680,10 +681,14 @@ const TicketCard = ({ ticket, savedLocations }: { ticket: TicketModel; savedLoca
 const VOICE_SEND_ARM_DELAY_MS = 700;
 
 function App() {
-  const { tickets, syncNow, isConnected, hasRemoteSession, connectionPhase } = useSync();
-  const { t } = useI18n();
+    const { 
+      tickets: baseTickets, syncNow, isConnected, hasRemoteSession, connectionPhase,
+      proposedActions, acceptProposals, rejectProposals 
+    } = useSync();
+    const { t } = useI18n();
     const [inputValue, setInputValue] = useState("");
     const [isProcessing, setIsProcessing] = useState(false);
+    const [agentProgress, setAgentProgress] = useState<any>(null);
   const placeholder = t('placeholderManageStack');
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [integrations] = useState<string[]>([]);
@@ -699,6 +704,10 @@ function App() {
     const [voiceError, setVoiceError] = useState<string | null>(null);
     const [isSendTemporarilyLocked, setIsSendTemporarilyLocked] = useState(false);
     const supportsDesktopWindowControls = useMemo(() => canUseDesktopWindowControls(), []);
+
+    const projectedTickets = useMemo(() => {
+      return projectTickets(baseTickets, proposedActions);
+    }, [baseTickets, proposedActions]);
 
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const drawerRef = useRef<HTMLDivElement>(null);
@@ -983,11 +992,42 @@ function App() {
         unlisten = dispose;
       });
 
+      let unlistenProgress: (() => void) | null = null;
+      listen('AGENT_PROGRESS_UPDATE', (event) => {
+        setAgentProgress(event.payload);
+      }).then((dispose) => {
+        unlistenProgress = dispose;
+      });
+
+      let unlistenAnswer: (() => void) | null = null;
+      listen<{ answer?: string; error?: string }>('AGENT_ANSWER', (event) => {
+        const { answer, error } = event.payload;
+        if (answer) {
+          setChatHistory((prev) => [...prev, { role: 'assistant', content: answer }]);
+        } else if (error) {
+          console.error('Agent error:', error);
+        }
+      }).then((dispose) => {
+        unlistenAnswer = dispose;
+      });
+
+      let unlistenDone: (() => void) | null = null;
+      listen('AGENT_DONE', () => {
+        setAgentProgress(null);
+        setIsProcessing(false);
+        setInteractionState('IDLE');
+      }).then((dispose) => {
+        unlistenDone = dispose;
+      });
+
       return () => {
         if (sendUnlockTimeoutRef.current !== null) {
           window.clearTimeout(sendUnlockTimeoutRef.current);
         }
         unlisten?.();
+        unlistenProgress?.();
+        unlistenAnswer?.();
+        unlistenDone?.();
         void stopRecording();
       };
     }, []);
@@ -997,18 +1037,15 @@ function App() {
         setInputValue(""); setIsProcessing(true); setInteractionState('PROCESSING');
         const userMsg: ChatMessage = { role: 'user', content: message }; const updatedHistory = [...chatHistory, userMsg]; setChatHistory(updatedHistory);
         try {
-            const response = await invoke<ChatMessage[]>("chat_local", { message, history: updatedHistory });
-            if (response && response.length > 0) {
-                setChatHistory(prev => [...prev, ...response]);
-                const lastMsg = response[response.length - 1];
-                if (lastMsg.content) { if (lastMsg.content.trim().endsWith('?')) { setInteractionState('AWAITING_REPLY'); } else { setInteractionState('SUCCESS'); setTimeout(() => setInteractionState('IDLE'), 2000); } }
-            }
-            await syncNow();
+            // chat_local is now async, returns immediately.
+            await invoke("chat_local", { message, history: updatedHistory });
+            // The result will come back via AGENT_PROGRESS_UPDATE and AGENT_PROPOSALS_SYNC
         } catch (invokeErr) {
             console.error("Local chat failed:", invokeErr);
             setInteractionState('ERROR');
             setTimeout(() => setInteractionState('IDLE'), 3000);
-        } finally { setIsProcessing(false); if (inputRef.current) inputRef.current.focus(); }
+            setIsProcessing(false);
+        } finally { if (inputRef.current) inputRef.current.focus(); }
     };
 
     return (
@@ -1044,14 +1081,41 @@ function App() {
             </header>
 
             <section className="stack-container flex-1 overflow-y-auto no-scrollbar pb-4 flex flex-col relative z-10">
-                <div className="px-6 pt-4 flex flex-col"><div className="scope-root flex flex-col pt-2">{tickets.length === 0 ? (<div className="text-[var(--text-secondary)] text-center py-5 text-[13px]">{t('emptyStack')}</div>) : (
+                <div className="px-6 pt-4 flex flex-col">
+                  <div className="scope-root flex flex-col pt-2">{projectedTickets.length === 0 ? (<div className="text-[var(--text-secondary)] text-center py-5 text-[13px]">{t('emptyStack')}</div>) : (
                     (() => {
-                  const grouped = groupTickets(tickets); const dayKeys = Object.keys(grouped.days);
-                  return (<>{grouped.inFocus && (<div className="mb-8"><div className="pl-[2.5px] mb-2 flex items-center h-4"><span className="text-[10px] font-bold uppercase tracking-[1.5px] text-[#3B82F6]">{t('nowInFocus')}</span></div><TicketCard ticket={grouped.inFocus} savedLocations={savedLocations} /></div>)}{grouped.unplanned.length > 0 && (<div className={cn("task-list flex flex-col gap-4 px-4 pb-8", dayKeys.length > 0 && "opacity-60 grayscale-[0.5]")}>{grouped.unplanned.map(ticket => <TicketCard key={ticket.id} ticket={ticket} savedLocations={savedLocations} />)}</div>)}{dayKeys.length > 0 && (<ScopeBlock label={t('timeline')} type="week">{dayKeys.map(dayLabel => (<ScopeBlock key={dayLabel} label={dayLabel} type="day"><div className="task-list flex flex-col gap-4">{grouped.days[dayLabel].map(ticket => <TicketCard key={ticket.id} ticket={ticket} savedLocations={savedLocations} />)}</div></ScopeBlock>))}</ScopeBlock>)}</>);
+                  const grouped = groupTickets(projectedTickets); const dayKeys = Object.keys(grouped.days);
+                  const isTicketProposed = (id: string) => proposedActions.some(a => a.entity_id === id);
+                  return (<>{grouped.inFocus && (<div className="mb-8"><div className="pl-[2.5px] mb-2 flex items-center h-4"><span className="text-[10px] font-bold uppercase tracking-[1.5px] text-[#3B82F6]">{t('nowInFocus')}</span></div><TicketCard ticket={grouped.inFocus} savedLocations={savedLocations} isProposed={isTicketProposed(grouped.inFocus.id)} /></div>)}{grouped.unplanned.length > 0 && (<div className={cn("task-list flex flex-col gap-4 px-4 pb-8", dayKeys.length > 0 && "opacity-60 grayscale-[0.5]")}>{grouped.unplanned.map(ticket => <TicketCard key={ticket.id} ticket={ticket} savedLocations={savedLocations} isProposed={isTicketProposed(ticket.id)} />)}</div>)}{dayKeys.length > 0 && (<ScopeBlock label={t('timeline')} type="week">{dayKeys.map(dayLabel => (<ScopeBlock key={dayLabel} label={dayLabel} type="day"><div className="task-list flex flex-col gap-4">{grouped.days[dayLabel].map(ticket => <TicketCard key={ticket.id} ticket={ticket} savedLocations={savedLocations} isProposed={isTicketProposed(ticket.id)} />)}</div></ScopeBlock>))}</ScopeBlock>)}</>);
                     })()
                 )}</div></div>
                 <div className="h-[20px] shrink-0" />
             </section>
+
+            {/* Proposed Actions Bar - Integrated into the History Notch */}
+            {proposedActions.length > 0 && (
+                <div className="w-full z-40 relative pointer-events-none">
+                    <div className="px-6 pb-2 flex items-center justify-between pointer-events-auto">
+                        <span className="text-[11px] text-white/20 uppercase tracking-[0.2em] font-bold">
+                            {proposedActions.length} Pending
+                        </span>
+                        <div className="flex gap-1.5 h-7">
+                            <button 
+                                onClick={() => rejectProposals()}
+                                className="px-3 rounded-full bg-white/[0.03] hover:bg-white/[0.08] border border-white/[0.05] text-[11px] text-white/40 hover:text-white/70 transition-all font-medium uppercase tracking-wider"
+                            >
+                                Dismiss
+                            </button>
+                            <button 
+                                onClick={() => acceptProposals()}
+                                className="px-3 rounded-full bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.08] text-[11px] text-white/90 hover:text-white transition-all font-bold uppercase tracking-wider"
+                            >
+                                Apply
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* --- THE HISTORY NOTCH (Truly Full-Width Physical Pull-Up) --- */}
             <div className="w-full z-40 relative pointer-events-none">

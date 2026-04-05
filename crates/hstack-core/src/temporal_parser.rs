@@ -11,17 +11,17 @@ pub fn parse_agent_rrule(rrule_input: &str) -> Result<(DateTime<FixedOffset>, Op
         .lines()
         .find_map(|line| line.strip_prefix("DTSTART:"))
         .map(str::trim)
-        .ok_or_else(|| format!("Agent generated invalid RFC 5545 string: missing DTSTART (Input: {})", rrule_input))?;
+        .ok_or_else(|| format!("Agent generated invalid RFC 5545 string: missing DTSTART (Input: {rrule_input})"))?;
 
     let start_time = parse_dtstart_value(dtstart_value)
-        .map_err(|e| format!("Agent generated invalid RFC 5545 string: {} (Input: {})", e, rrule_input))?;
+        .map_err(|e| format!("Agent generated invalid RFC 5545 string: {e} (Input: {rrule_input})"))?;
 
     if !normalized.contains("RRULE:") {
         return Ok((start_time, None));
     }
 
     RRuleSet::from_str(&normalized)
-        .map_err(|e| format!("Agent generated invalid RFC 5545 string: {} (Input: {})", e, rrule_input))?;
+        .map_err(|e| format!("Agent generated invalid RFC 5545 string: {e} (Input: {rrule_input})"))?;
 
     Ok((start_time, Some(normalized)))
 }
@@ -48,7 +48,11 @@ fn parse_dtstart_value(value: &str) -> Result<DateTime<FixedOffset>, String> {
     let trimmed = value.trim_end_matches('Z');
     let naive = NaiveDateTime::parse_from_str(trimmed, "%Y%m%dT%H%M%S")
         .or_else(|_| NaiveDateTime::parse_from_str(trimmed, "%Y%m%dT%H%M"))
-        .map_err(|e| format!("invalid DTSTART value: {}", e))?;
+        .or_else(|_| {
+            chrono::NaiveDate::parse_from_str(trimmed, "%Y%m%d")
+                .map(|d| d.and_hms_opt(10, 0, 0).expect("valid hms"))
+        })
+        .map_err(|e| format!("invalid DTSTART value: {e}"))?;
 
     match Local.from_local_datetime(&naive) {
         LocalResult::Single(value) => Ok(value.fixed_offset()),

@@ -29,7 +29,7 @@ pub(crate) struct VoiceSecretStatus {
 pub async fn get_settings(app: AppHandle) -> Result<UserSettings, String> {
     let store = match app.store("settings.json") {
         Ok(s) => s,
-        Err(e) => return Err(format!("Settings store failure: {}", e)),
+        Err(e) => return Err(format!("Settings store failure: {e}")),
     };
 
     let settings_val = match store.get("user_settings") {
@@ -39,7 +39,7 @@ pub async fn get_settings(app: AppHandle) -> Result<UserSettings, String> {
 
     match serde_json::from_value(settings_val) {
         Ok(s) => Ok(s),
-        Err(e) => Err(format!("Settings parse failure: {}", e)),
+        Err(e) => Err(format!("Settings parse failure: {e}")),
     }
 }
 
@@ -47,13 +47,13 @@ pub async fn get_settings(app: AppHandle) -> Result<UserSettings, String> {
 pub async fn save_settings(app: AppHandle, settings: UserSettings) -> Result<(), String> {
     let store = match app.store("settings.json") {
         Ok(s) => s,
-        Err(e) => return Err(format!("Settings store failure: {}", e)),
+        Err(e) => return Err(format!("Settings store failure: {e}")),
     };
 
     store.set("user_settings", serde_json::json!(settings));
     match store.save() {
         Ok(_) => Ok(()),
-        Err(e) => Err(format!("Settings save failure: {}", e)),
+        Err(e) => Err(format!("Settings save failure: {e}")),
     }
 }
 
@@ -107,7 +107,7 @@ pub(crate) async fn append_pending_action(
 ) -> Result<(), String> {
     let store = match app.store("pending_actions.json") {
         Ok(s) => s,
-        Err(e) => return Err(format!("History store failure: {}", e)),
+        Err(e) => return Err(format!("History store failure: {e}")),
     };
 
     let mut actions: Vec<SyncAction> = match store.get("pending") {
@@ -136,14 +136,14 @@ pub(crate) async fn append_pending_action(
             let _ = app.emit(SYNC_TICKETS_CHANGED_EVENT, serde_json::json!({}));
             Ok(())
         }
-        Err(e) => Err(format!("Failed to save pending action: {}", e)),
+        Err(e) => Err(format!("Failed to save pending action: {e}")),
     }
 }
 
-pub(crate) async fn load_tickets_state(app: AppHandle) -> Result<Vec<Ticket>, String> {
+pub(crate) async fn load_tickets_state_raw(app: AppHandle) -> Result<(Vec<Ticket>, Vec<SyncAction>), String> {
     let base_store = match app.store("base_state.json") {
         Ok(s) => s,
-        Err(e) => return Err(format!("Base state store failure: {}", e)),
+        Err(e) => return Err(format!("Base state store failure: {e}")),
     };
     let base_tickets: Vec<Ticket> = match base_store.get("tickets") {
         Some(val) => serde_json::from_value(val).unwrap_or_default(),
@@ -152,13 +152,18 @@ pub(crate) async fn load_tickets_state(app: AppHandle) -> Result<Vec<Ticket>, St
 
     let pending_store = match app.store("pending_actions.json") {
         Ok(s) => s,
-        Err(e) => return Err(format!("Pending actions store failure: {}", e)),
+        Err(e) => return Err(format!("Pending actions store failure: {e}")),
     };
     let pending_actions: Vec<SyncAction> = match pending_store.get("pending") {
         Some(val) => serde_json::from_value(val).unwrap_or_default(),
         None => Vec::new(),
     };
 
+    Ok((base_tickets, pending_actions))
+}
+
+pub(crate) async fn load_tickets_state(app: AppHandle) -> Result<Vec<Ticket>, String> {
+    let (base_tickets, pending_actions) = load_tickets_state_raw(app).await?;
     Ok(normalize_projected_tickets(project_state(base_tickets, &pending_actions)))
 }
 
@@ -167,20 +172,75 @@ pub async fn get_tickets(app: AppHandle) -> Result<Vec<Ticket>, String> {
     load_tickets_state(app).await
 }
 
+pub(crate) async fn load_agent_memory(app: AppHandle) -> Result<hstack_agent::memory::WorkingMemory, String> {
+    let store = match app.store("agent_memory.json") {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Agent memory store failure: {e}")),
+    };
+    match store.get("memory") {
+        Some(val) => serde_json::from_value(val).map_err(|e| format!("Failed to parse agent memory: {e}")),
+        None => Ok(hstack_agent::memory::WorkingMemory::default()),
+    }
+}
+
+pub(crate) async fn save_agent_memory(app: AppHandle, memory: hstack_agent::memory::WorkingMemory) -> Result<(), String> {
+    let store = match app.store("agent_memory.json") {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Agent memory store failure: {e}")),
+    };
+    store.set("memory", serde_json::json!(memory));
+    store.save().map_err(|e| format!("Failed to save agent memory: {e}"))
+}
+
+#[tauri::command]
+pub async fn get_agent_proposals(app: AppHandle) -> Result<Vec<SyncAction>, String> {
+    let memory = load_agent_memory(app).await?;
+    Ok(memory.proposed_stack_actions)
+}
+
+#[tauri::command]
+pub async fn accept_agent_proposals(app: AppHandle) -> Result<(), String> {
+    let mut memory = load_agent_memory(app.clone()).await?;
+    let actions = std::mem::take(&mut memory.proposed_stack_actions);
+    save_agent_memory(app.clone(), memory).await?;
+
+    for action in actions {
+        append_pending_action(
+            &app,
+            action.r#type,
+            action.entity_id,
+            action.entity_type,
+            action.payload,
+            action.status,
+            action.notes,
+        ).await?;
+    }
+    
+    let _ = crate::sync_runtime::trigger_flush(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reject_agent_proposals(app: AppHandle) -> Result<(), String> {
+    let mut memory = load_agent_memory(app.clone()).await?;
+    memory.proposed_stack_actions.clear();
+    save_agent_memory(app, memory).await
+}
+
 pub(crate) async fn apply_sync_update_state(
     app: AppHandle,
     new_base_tickets: Vec<Ticket>,
 ) -> Result<(), String> {
     let base_store = match app.store("base_state.json") {
         Ok(s) => s,
-        Err(e) => return Err(format!("Base state store failure: {}", e)),
+        Err(e) => return Err(format!("Base state store failure: {e}")),
     };
     base_store.set("tickets", serde_json::json!(new_base_tickets));
     let _ = base_store.save();
 
     let pending_store = match app.store("pending_actions.json") {
         Ok(s) => s,
-        Err(e) => return Err(format!("Pending actions store failure: {}", e)),
+        Err(e) => return Err(format!("Pending actions store failure: {e}")),
     };
 
     let pending_actions: Vec<SyncAction> = match pending_store.get("pending") {
@@ -196,7 +256,7 @@ pub(crate) async fn apply_sync_update_state(
             let _ = app.emit(SYNC_TICKETS_CHANGED_EVENT, serde_json::json!({}));
             Ok(())
         }
-        Err(e) => Err(format!("Failed to update pending actions after sync: {}", e)),
+        Err(e) => Err(format!("Failed to update pending actions after sync: {e}")),
     }
 }
 

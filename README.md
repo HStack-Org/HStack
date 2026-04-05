@@ -220,6 +220,25 @@ The first run compiles the Rust side and can take a while. Iteration after that 
 npm run reset:welcome
 ```
 
+## Verification
+
+Rust validation:
+
+```bash
+cargo clippy -p hstack-core -p hstack-agent -p hstack-cli --all-targets -- -D warnings
+cargo test -p hstack-core -p hstack-agent -p hstack-cli
+```
+
+Formal harness proofs with Kani:
+
+```bash
+cargo install --locked kani-verifier
+cargo kani setup
+cargo kani -p hstack-agent --lib
+```
+
+The same Kani command is executed in CI by [.github/workflows/kani.yml](.github/workflows/kani.yml).
+
 That helper removes the derived app settings file without hardcoding a machine-specific path.
 
 ## Android
