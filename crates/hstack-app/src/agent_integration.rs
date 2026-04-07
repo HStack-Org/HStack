@@ -3,7 +3,6 @@ use tauri::AppHandle;
 
 use hstack_agent::memory::HStackWorld;
 use hstack_agent::AgentControlSystem;
-use hstack_agent::error::Error as AgentError;
 use hstack_core::stack_snapshot::StackSnapshot;
 use hstack_core::sync::SyncAction;
 

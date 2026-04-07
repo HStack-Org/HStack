@@ -23,6 +23,7 @@ pub(crate) fn parse_departure_time_arg(
     shared::parse_departure_time_arg(args, key, label)
 }
 
+#[allow(dead_code)]
 pub(crate) fn format_saved_locations_for_prompt(saved_locations: &[SavedLocation]) -> String {
     shared::format_saved_locations_for_prompt(saved_locations)
 }

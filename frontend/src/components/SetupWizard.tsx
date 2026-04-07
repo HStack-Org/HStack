@@ -3,7 +3,18 @@ import { invoke } from '@tauri-apps/api/core';
 import { HardDrive, LoaderCircle, Server } from 'lucide-react';
 import { WebGLGrain } from './WebGLGrain';
 import { AnimatedWebGLGrain } from './AnimatedWebGLGrain';
-import { clearRemoteSession, authenticateRemote, saveRemoteSession, type RemoteAuthMode, resolveAuthBaseUrl } from '../syncAuth';
+import {
+  REMOTE_GOOGLE_PROVIDER,
+  REMOTE_OAUTH_REDIRECT_EVENT,
+  authenticateRemote,
+  clearRemoteSession,
+  completeRemoteOAuth,
+  parseRemoteOAuthRedirectUrl,
+  saveRemoteSession,
+  startGoogleRemoteOAuth,
+  type RemoteAuthMode,
+  resolveAuthBaseUrl,
+} from '../syncAuth';
 import { isOfficialCloudConfigured, normalizeSyncBaseUrl, notifySyncConfigUpdated, type SyncMode, type UserSettingsShape } from '../syncConfig';
 import { useI18n } from '../i18n';
 
@@ -99,6 +110,17 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
   const [password, setPassword] = useState('');
   const [customServerUrl, setCustomServerUrl] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const selectedBaseUrl = selectedMode ? resolveAuthBaseUrl(selectedMode, customServerUrl) : null;
+  const officialCloudReady = isOfficialCloudConfigured();
+  const isRemoteMode = selectedMode === 'CloudOfficial' || selectedMode === 'CloudCustom';
+  const hasLoginEmail = loginEmail.trim().length > 0;
+  const hasRegisterFirstName = firstName.trim().length > 0;
+  const hasRegisterEmail = email.trim().length > 0;
+  const canSubmitRemote = Boolean(
+    password.trim() &&
+      selectedBaseUrl &&
+      (authMode === 'login' ? hasLoginEmail : hasRegisterFirstName && hasRegisterEmail)
+  );
 
   const options = [
     {
@@ -134,17 +156,59 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
     void loadExistingSettings();
   }, []);
 
-  const selectedBaseUrl = selectedMode ? resolveAuthBaseUrl(selectedMode, customServerUrl) : null;
-  const officialCloudReady = isOfficialCloudConfigured();
-  const isRemoteMode = selectedMode === 'CloudOfficial' || selectedMode === 'CloudCustom';
-  const hasLoginEmail = loginEmail.trim().length > 0;
-  const hasRegisterFirstName = firstName.trim().length > 0;
-  const hasRegisterEmail = email.trim().length > 0;
-  const canSubmitRemote = Boolean(
-    password.trim() &&
-      selectedBaseUrl &&
-      (authMode === 'login' ? hasLoginEmail : hasRegisterFirstName && hasRegisterEmail)
-  );
+  useEffect(() => {
+    if (!selectedMode || !isRemoteMode) {
+      return;
+    }
+
+    const handleOAuthRedirect = async (event: Event) => {
+      const urls = (event as CustomEvent<string[]>).detail || [];
+      const baseUrl = resolveAuthBaseUrl(selectedMode, customServerUrl);
+      if (!baseUrl) {
+        return;
+      }
+
+      const redirect = urls
+        .map((url) => parseRemoteOAuthRedirectUrl(url))
+        .find((value) => value?.provider === REMOTE_GOOGLE_PROVIDER);
+
+      if (!redirect) {
+        return;
+      }
+
+      if (redirect.error) {
+        setErrorMessage(redirect.errorDescription || redirect.error);
+        setSavingMode(null);
+        return;
+      }
+
+      if (!redirect.code) {
+        setErrorMessage(t('googleAuthMissingCode'));
+        setSavingMode(null);
+        return;
+      }
+
+      try {
+        setSavingMode(selectedMode);
+        setErrorMessage(null);
+
+        const session = await completeRemoteOAuth(baseUrl, redirect.code);
+        await saveRemoteSession(session);
+        await invoke('complete_onboarding', { mode: selectedMode });
+        notifySyncConfigUpdated();
+        onComplete();
+      } catch (error) {
+        console.error('Failed to complete Google OAuth sign-in:', error);
+        setErrorMessage(error instanceof Error ? error.message : t('remoteAuthFailed'));
+        setSavingMode(null);
+      }
+    };
+
+    window.addEventListener(REMOTE_OAUTH_REDIRECT_EVENT, handleOAuthRedirect as EventListener);
+    return () => {
+      window.removeEventListener(REMOTE_OAUTH_REDIRECT_EVENT, handleOAuthRedirect as EventListener);
+    };
+  }, [customServerUrl, isRemoteMode, onComplete, selectedMode, t]);
 
   const resetRemoteForm = () => {
     setSelectedMode(null);
@@ -227,6 +291,43 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
       onComplete();
     } catch (error) {
       console.error('Failed to authenticate hosted sync:', error);
+      setErrorMessage(error instanceof Error ? error.message : t('remoteAuthFailed'));
+      setSavingMode(null);
+    }
+  };
+
+  const handleGoogleAuthenticate = async () => {
+    if (!selectedMode || !isRemoteMode || savingMode) {
+      return;
+    }
+
+    try {
+      setSavingMode(selectedMode);
+      setErrorMessage(null);
+
+      const baseUrl = resolveAuthBaseUrl(selectedMode, customServerUrl);
+
+      if (!baseUrl) {
+        throw new Error(
+          selectedMode === 'CloudOfficial'
+            ? t('officialCloudNotReady')
+            : t('enterValidBaseUrl')
+        );
+      }
+
+      if (selectedMode === 'CloudCustom') {
+        const currentSettings = await invoke<SetupSettings>('get_settings');
+        await invoke('save_settings', {
+          settings: {
+            ...currentSettings,
+            custom_server_url: normalizeSyncBaseUrl(customServerUrl),
+          },
+        });
+      }
+
+      await startGoogleRemoteOAuth(baseUrl);
+    } catch (error) {
+      console.error('Failed to start Google OAuth:', error);
       setErrorMessage(error instanceof Error ? error.message : t('remoteAuthFailed'));
       setSavingMode(null);
     }
@@ -356,6 +457,22 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
                       className="font-mono"
                     />
                   ) : null}
+
+                  <button
+                    type="button"
+                    onClick={handleGoogleAuthenticate}
+                    disabled={!selectedBaseUrl || Boolean(savingMode)}
+                    className="flex items-center justify-center gap-2 rounded-[1rem] border border-white/10 bg-white/[0.04] px-4 py-3 text-[11px] font-bold uppercase tracking-[0.18em] text-[#F3F3F3] transition-all hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    {savingMode ? <LoaderCircle size={14} className="animate-spin" /> : null}
+                    <span>{t('continueWithGoogle')}</span>
+                  </button>
+
+                  <div className="flex items-center gap-3 px-1">
+                    <div className="h-px flex-1 bg-white/8" />
+                    <span className="text-[9px] font-bold uppercase tracking-[0.22em] text-white/26">{t('or')}</span>
+                    <div className="h-px flex-1 bg-white/8" />
+                  </div>
 
                   <WizardInput
                     label={t('email')}

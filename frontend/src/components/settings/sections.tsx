@@ -34,6 +34,7 @@ interface HostingSyncSectionProps {
   onSyncEmailChange: (value: string) => void;
   onSyncPasswordChange: (value: string) => void;
   onRemoteAuth: () => void;
+  onRemoteGoogleAuth: () => void;
   onSignOut: () => void;
 }
 
@@ -62,6 +63,7 @@ export const HostingSyncSection = ({
   onSyncEmailChange,
   onSyncPasswordChange,
   onRemoteAuth,
+  onRemoteGoogleAuth,
   onSignOut,
 }: HostingSyncSectionProps) => (
   <section className="mb-8">
@@ -259,6 +261,22 @@ export const HostingSyncSection = ({
                   {syncError}
                 </div>
               ) : null}
+
+              <button
+                type="button"
+                onClick={onRemoteGoogleAuth}
+                disabled={!remoteBaseUrl || syncPending}
+                className="inline-flex items-center justify-center gap-2 rounded-[1rem] border border-white/10 bg-white/[0.04] px-4 py-3 text-[11px] font-bold uppercase tracking-[0.2em] text-[#F3F3F3] transition-all hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {syncPending ? <LoaderCircle size={14} className="animate-spin" /> : null}
+                {t('continueWithGoogle')}
+              </button>
+
+              <div className="flex items-center gap-3 px-1">
+                <div className="h-px flex-1 bg-white/8" />
+                <span className="text-[9px] font-bold uppercase tracking-[0.22em] text-white/26">{t('or')}</span>
+                <div className="h-px flex-1 bg-white/8" />
+              </div>
 
               <button
                 type="button"

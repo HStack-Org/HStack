@@ -1,7 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { buildApiUrl, getOfficialCloudUrl, normalizeSyncBaseUrl, type SyncMode } from './syncConfig';
 
 export type RemoteAuthMode = 'login' | 'register';
+export const REMOTE_OAUTH_REDIRECT_EVENT = 'hstack:remote-oauth-redirect';
+export const REMOTE_GOOGLE_PROVIDER = 'google';
+const REMOTE_OAUTH_REDIRECT_URI = 'hstack://oauth/callback';
 
 interface RemoteUser {
   id: number;
@@ -13,6 +17,20 @@ interface RemoteUser {
 interface RemoteAuthResponse {
   token: string;
   user: RemoteUser;
+}
+
+interface RemoteOAuthStartResponse {
+  provider: string;
+  authorization_url: string;
+  state: string;
+}
+
+interface RemoteOAuthRedirectResult {
+  provider: string;
+  state: string | null;
+  code: string | null;
+  error: string | null;
+  errorDescription: string | null;
 }
 
 interface RemoteAuthRequest {
@@ -115,4 +133,63 @@ export const saveRemoteSession = async (session: RemoteAuthResponse) => {
 
 export const clearRemoteSession = async () => {
   await invoke('clear_sync_session');
+};
+
+export const startGoogleRemoteOAuth = async (baseUrl: string): Promise<RemoteOAuthStartResponse> => {
+  const response = await fetch(buildApiUrl(baseUrl, '/api/auth/oauth/start'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      provider: REMOTE_GOOGLE_PROVIDER,
+      redirect_uri: REMOTE_OAUTH_REDIRECT_URI,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+
+  const payload = (await response.json()) as RemoteOAuthStartResponse;
+  await openUrl(payload.authorization_url);
+  return payload;
+};
+
+export const completeRemoteOAuth = async (baseUrl: string, code: string): Promise<RemoteAuthResponse> => {
+  const response = await fetch(buildApiUrl(baseUrl, '/api/auth/oauth/complete'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ code }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+
+  return response.json();
+};
+
+export const parseRemoteOAuthRedirectUrl = (urlValue: string): RemoteOAuthRedirectResult | null => {
+  let url: URL;
+
+  try {
+    url = new URL(urlValue);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== 'hstack:' || url.hostname !== 'oauth' || url.pathname !== '/callback') {
+    return null;
+  }
+
+  return {
+    provider: url.searchParams.get('provider') || REMOTE_GOOGLE_PROVIDER,
+    state: url.searchParams.get('state'),
+    code: url.searchParams.get('code'),
+    error: url.searchParams.get('error'),
+    errorDescription: url.searchParams.get('error_description'),
+  };
 };

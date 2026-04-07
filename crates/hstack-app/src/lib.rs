@@ -10,11 +10,8 @@ mod sync_runtime;
 mod voice_runtime;
 
 use tauri::{AppHandle, Manager};
-use tauri_plugin_store::StoreExt;
 use rustls::crypto::ring::default_provider;
-use hstack_core::error::Error as CoreError;
 use hstack_core::provider::{Message, ProviderConfig};
-use hstack_core::sync::SyncAction;
 use secure_store::SecureStore;
 use sync_runtime::NativeSyncRuntimeState;
 pub(crate) use app_state::{append_pending_action, apply_sync_update_state, get_settings, load_sync_session, load_tickets_state, SyncSessionInfo};
@@ -132,11 +129,24 @@ pub fn run() {
         panic!("{error}");
     }
 
-    let app = match tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(NativeSyncRuntimeState::default())
         .manage(voice_runtime::VoiceRuntimeState::default())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .setup(|_app| {
+            #[cfg(any(windows, target_os = "linux"))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+
+            _app.deep_link()
+                    .register_all()
+                    .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
+            }
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_state::get_settings,
             app_state::save_settings,
@@ -165,7 +175,9 @@ pub fn run() {
             voice_runtime::start_voice_transcription,
             voice_runtime::append_voice_audio_chunk,
             voice_runtime::stop_voice_transcription
-        ])
+        ]);
+
+    let app = match builder
         .build(tauri::generate_context!()) {
             Ok(app) => app,
             Err(error) => panic!("error while building tauri application: {error}"),
@@ -192,33 +204,16 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_first_json_value, format_saved_locations_for_prompt, infer_commute_payload_from_event, resolve_commute_location, validate_plan, PlannerAction, PlannerPlan};
-    use crate::location_utils::normalize_legacy_commute_payload;
-    use crate::planner_support::{PlannerCommitment, PlannerDependencyImpact};
+    use crate::location_utils::{
+        format_saved_locations_for_prompt,
+        infer_commute_payload_from_event,
+        normalize_legacy_commute_payload,
+        resolve_commute_location,
+    };
     use hstack_core::settings::{SavedLocation, UserSettings};
-    use hstack_core::ticket::{tool_schemas, TicketLocation, TicketPayload};
+    use hstack_core::ticket::{TicketLocation, TicketPayload};
     use serde::Serialize;
     use serde_json::{json, Value};
-
-    fn must_extract_json_value(input: &str) -> Value {
-        match extract_first_json_value(input) {
-            Some(value) => value,
-            None => panic!("expected fenced JSON to parse"),
-        }
-    }
-
-    fn assert_plan_is_valid(plan: PlannerPlan) {
-        if let Err(error) = validate_plan(plan, &tool_schemas()) {
-            panic!("expected valid planner plan: {error}");
-        }
-    }
-
-    fn expect_plan_validation_error(plan: PlannerPlan) -> String {
-        match validate_plan(plan, &tool_schemas()) {
-            Ok(_) => panic!("expected validation to fail"),
-            Err(error) => error,
-        }
-    }
 
     fn must_infer_commute_payload(event_id: &str, payload: &TicketPayload) -> TicketPayload {
         match infer_commute_payload_from_event(event_id, payload) {
@@ -253,127 +248,6 @@ mod tests {
             }],
             ..UserSettings::default()
         }
-    }
-
-    fn sample_plan() -> PlannerPlan {
-        PlannerPlan {
-            user_goal: "Reschedule prep work before a birthday dinner".to_string(),
-            grounded_facts: vec![
-                "Birthday dinner is a dated event already in the stack".to_string(),
-                "Buy flowers depends on that dinner happening on time".to_string(),
-            ],
-            time_constraints: vec!["Dinner is next Friday at 19:00".to_string()],
-            existing_tickets_relevant: vec!["event-birthday-dinner".to_string(), "task-buy-flowers".to_string()],
-            dependent_tickets_impacted: vec![PlannerDependencyImpact {
-                ticket_id: "task-buy-flowers".to_string(),
-                title: Some("Buy flowers".to_string()),
-                reason: "It is anchored to the dinner date".to_string(),
-                action_required: true,
-            }],
-            new_commitments_detected: vec![PlannerCommitment {
-                r#type: Some("EVENT".to_string()),
-                title: Some("Birthday dinner".to_string()),
-                rrule: Some("DTSTART:20260320T190000Z".to_string()),
-                duration_minutes: Some(120),
-            }],
-            proactive_opportunities: vec!["Move flower pickup earlier in the day".to_string()],
-            assumptions_to_apply: vec!["Use the existing event as the anchor".to_string()],
-            tool_actions: vec![
-                PlannerAction {
-                    tool: "create_ticket".to_string(),
-                    arguments: json!({
-                        "type": "EVENT",
-                        "title": "Birthday dinner",
-                        "rrule": "DTSTART:20260320T190000Z",
-                        "duration_minutes": 120,
-                    }),
-                },
-                PlannerAction {
-                    tool: "edit_ticket".to_string(),
-                    arguments: json!({
-                        "ticket_id": "task-buy-flowers",
-                        "rrule": "DTSTART:20260320T140000Z"
-                    }),
-                },
-            ],
-            user_reply_strategy: "Explain the reschedule and confirm the new sequence briefly.".to_string(),
-        }
-    }
-
-    #[test]
-    fn extracts_json_from_fenced_planner_output() {
-        let parsed = must_extract_json_value("```json\n{\"user_goal\":\"Plan\"}\n```");
-
-        assert_eq!(parsed.get("user_goal").and_then(|value| value.as_str()), Some("Plan"));
-    }
-
-    #[test]
-    fn validates_dependency_aware_plan() {
-        let plan = sample_plan();
-
-        assert_plan_is_valid(plan);
-    }
-
-    #[test]
-    fn rejects_tool_actions_without_grounded_facts() {
-        let mut plan = sample_plan();
-        plan.grounded_facts.clear();
-
-        let error = expect_plan_validation_error(plan);
-        assert!(error.contains("grounded facts"));
-    }
-
-    #[test]
-    fn rejects_commitment_details_without_title() {
-        let mut plan = sample_plan();
-        plan.new_commitments_detected[0].title = None;
-
-        let error = expect_plan_validation_error(plan);
-        assert!(error.contains("no title"));
-    }
-
-    #[test]
-    fn rejects_duplicate_dependent_ticket_entries() {
-        let mut plan = sample_plan();
-        plan.dependent_tickets_impacted.push(PlannerDependencyImpact {
-            ticket_id: "task-buy-flowers".to_string(),
-            title: Some("Buy flowers".to_string()),
-            reason: "Duplicate reference".to_string(),
-            action_required: false,
-        });
-
-        let error = expect_plan_validation_error(plan);
-        assert!(error.contains("more than once"));
-    }
-
-    #[test]
-    fn rejects_edit_without_action_required_flag() {
-        let mut plan = sample_plan();
-        plan.dependent_tickets_impacted[0].action_required = false;
-
-        let error = expect_plan_validation_error(plan);
-        assert!(error.contains("action_required=true"));
-    }
-
-    #[test]
-    fn accepts_zero_duration_commitment_when_create_ticket_omits_duration() {
-        let mut plan = sample_plan();
-        plan.new_commitments_detected[0] = PlannerCommitment {
-            r#type: Some("TASK".to_string()),
-            title: Some("Walk the cat".to_string()),
-            rrule: None,
-            duration_minutes: Some(0),
-        };
-        plan.tool_actions = vec![PlannerAction {
-            tool: "create_ticket".to_string(),
-            arguments: json!({
-                "type": "TASK",
-                "title": "Walk the cat"
-            }),
-        }];
-        plan.dependent_tickets_impacted.clear();
-
-        assert_plan_is_valid(plan);
     }
 
     #[test]

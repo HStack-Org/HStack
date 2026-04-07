@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { SyncProvider, TicketModel } from "./SyncEngine";
-import { projectTickets, type SyncAction } from "./ticketPresentation";
+import { projectTickets } from "./ticketPresentation";
 import { useSync } from "./useSync";
-import { Send, ChevronDown, Plus, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ChevronUp, ExternalLink, Mic, Square, Check, X } from "lucide-react";
+import { Send, ChevronDown, Plus, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ChevronUp, ExternalLink, Mic, Square } from "lucide-react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link';
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { AnimatedWebGLGrain } from "./components/AnimatedWebGLGrain";
@@ -14,6 +15,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Settings } from "./components/Settings";
 import { SetupWizard } from "./components/SetupWizard";
 import { translate, useI18n } from "./i18n";
+import { REMOTE_OAUTH_REDIRECT_EVENT } from "./syncAuth";
 import {
   type SavedLocationRecord,
   type SavedLocationIndex,
@@ -43,6 +45,14 @@ const TASK_TYPE_LABELS = {
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
+
+const dispatchRemoteOAuthRedirectUrls = (urls: string[]) => {
+  if (urls.length === 0) {
+    return;
+  }
+
+  window.dispatchEvent(new CustomEvent<string[]>(REMOTE_OAUTH_REDIRECT_EVENT, { detail: urls }));
+};
 
 // --- Interaction States & Colors ---
 type InteractionState = 'IDLE' | 'PROCESSING' | 'AWAITING_REPLY' | 'SUCCESS' | 'ERROR';
@@ -495,7 +505,7 @@ const ScopeBlock = ({ label, type, children }: ScopeBlockProps) => {
     return (<div className="flex flex-col mb-4"><div className="pl-[2.5px] mb-1 flex items-center h-4"><span className={cn("text-[10px] font-bold uppercase tracking-[1.5px] whitespace-nowrap", isWeek ? "text-[#3B82F6]" : "text-white/30")}>{label}</span></div><div className="flex gap-2"><div className="shrink-0 pl-[4px]"><div className={cn("w-[1.5px] h-full transition-all duration-300", isWeek ? "bg-[#3B82F6]" : "bg-white/10")} /></div><div className="flex-1 flex flex-col gap-4">{children}</div></div></div>);
 };
 
-const TicketCard = ({ ticket, savedLocations, isProposed }: { ticket: TicketModel; savedLocations: SavedLocationIndex; isProposed?: boolean }) => {
+const TicketCard = ({ ticket, savedLocations }: { ticket: TicketModel; savedLocations: SavedLocationIndex; isProposed?: boolean }) => {
     const [isExpanded, setIsExpanded] = useState(false);
   const payload = ticket.payload || {};
     const isCompleted = payload.completed === true;
@@ -686,9 +696,51 @@ function App() {
       proposedActions, acceptProposals, rejectProposals 
     } = useSync();
     const { t } = useI18n();
+
+      useEffect(() => {
+        if (!isTauri()) {
+          return;
+        }
+
+        let dispose: (() => void) | undefined;
+        let active = true;
+
+        const registerDeepLinkHandlers = async () => {
+          try {
+            const initialUrls = await getCurrent();
+            if (active && initialUrls && initialUrls.length > 0) {
+              dispatchRemoteOAuthRedirectUrls(initialUrls);
+            }
+          } catch (error) {
+            console.error('Failed to read initial deep links:', error);
+          }
+
+          try {
+            const unlisten = await onOpenUrl((urls) => {
+              dispatchRemoteOAuthRedirectUrls(urls);
+            });
+
+            if (!active) {
+              unlisten();
+              return;
+            }
+
+            dispose = unlisten;
+          } catch (error) {
+            console.error('Failed to subscribe to deep-link events:', error);
+          }
+        };
+
+        void registerDeepLinkHandlers();
+
+        return () => {
+          active = false;
+          dispose?.();
+        };
+      }, []);
     const [inputValue, setInputValue] = useState("");
     const [isProcessing, setIsProcessing] = useState(false);
-    const [agentProgress, setAgentProgress] = useState<any>(null);
+    const [, setAgentProgress] = useState<any>(null);
   const placeholder = t('placeholderManageStack');
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [integrations] = useState<string[]>([]);

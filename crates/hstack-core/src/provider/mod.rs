@@ -48,8 +48,13 @@ impl fmt::Display for Role {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
+    #[serde(default = "default_tool_call_type")]
     pub r#type: String, // usually "function"
     pub function: ToolFunctionCall,
+}
+
+fn default_tool_call_type() -> String {
+    "function".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
