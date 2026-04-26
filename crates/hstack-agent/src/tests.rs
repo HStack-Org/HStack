@@ -6,7 +6,7 @@ mod tests {
     use crate::manager::{ContextManager, SimpleContextManager};
     use crate::control::AllowAllControl;
     use crate::provider::{LlmProvider, Message, Role};
-    use crate::tool::{compose_tools, CreateTicketTool, ExaSearchTool, FollowUpTool, IdentityTool, InspectAppTool, LightComputeTool, ManageAppTool, ScratchThought, ScratchpadEditTool, ScratchpadSearchTool, SearchStack, Tool};
+    use crate::tool::{compose_tools, CreateTicketTool, FollowUpTool, IdentityTool, InspectAppTool, LightComputeTool, ManageAppTool, ScratchThought, ScratchpadEditTool, ScratchpadSearchTool, SearchStack, Tool, WebSearchTool};
     use crate::workspace::{compose_workspace_system_message, render_workspace_projection, short_term_messages, AppId, AppLifecycle, WorkspaceDelta};
     use crate::action::{AgentAction, WorkingMemoryDelta};
     use crate::error::Error;
@@ -63,6 +63,10 @@ mod tests {
             }
             _ => panic!("unexpected action returned from light_compute"),
         }
+    }
+
+    fn light_compute_tool_for_backend(backend: &str) -> LightComputeTool {
+        LightComputeTool::new_for_tests_with_backend(backend)
     }
 
     #[async_trait]
@@ -1088,8 +1092,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exa_search_rejects_invalid_num_results_before_network() {
-        let tool = ExaSearchTool::new();
+    async fn test_web_search_rejects_invalid_num_results_before_network() {
+        let tool = match WebSearchTool::new() {
+            Ok(tool) => tool,
+            Err(e) => panic!("failed to construct web_search tool: {e}"),
+        };
         let world = InMemoryWorld { tickets: Vec::new() };
         let memory = WorkingMemory::new();
 
@@ -1097,13 +1104,13 @@ mod tests {
             "query": "rust",
             "num_results": 0
         }), &world, &memory).await {
-            Ok(_) => panic!("expected exa_search to reject out-of-range num_results"),
+            Ok(_) => panic!("expected web_search to reject out-of-range num_results"),
             Err(e) => e,
         };
 
         match err {
-            Error::Provider(msg) => assert!(msg.contains("exa_search 'num_results' must be between 1 and 25")),
-            _ => panic!("unexpected error type from exa_search"),
+            Error::Provider(msg) => assert!(msg.contains("web_search 'num_results' must be between 1 and 25")),
+            _ => panic!("unexpected error type from web_search"),
         }
     }
 
@@ -1698,8 +1705,9 @@ mod tests {
     async fn test_prompt_explicitly_separates_local_search_web_search_and_compute() {
         let prompt = build_base_prompt(AgentPromptProfile::DebugInteractive);
         assert!(prompt.contains("If the answer should come from the user's own HStack items, use `search_stack`."));
-        assert!(prompt.contains("If the answer should come from the public web, documentation, or current external facts, use `exa_search` when available."));
-        assert!(prompt.contains("If the answer should come from deterministic transformation of already-available information, use `light_compute`."));
+        assert!(prompt.contains("If the answer should come from the public web, documentation, or current external facts, use an external retrieval tool only if one is available in this turn."));
+        assert!(prompt.contains("If the answer should come from deterministic transformation of already-available information, use a deterministic compute tool only if one is available in this turn."));
+        assert!(prompt.contains("Do not assume optional tools exist unless they appear in the current turn's available tools."));
         assert!(prompt.contains("Do not use a local-stack tool to answer a world-knowledge question."));
         assert!(prompt.contains("Use `follow_up` only to record the needed clarification before the final `identity` reply."));
     }
@@ -1997,6 +2005,89 @@ mod tests {
         assert_eq!(
             payload.get("result").and_then(serde_json::Value::as_str),
             Some("hello hstack")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_light_compute_monty_backend_matches_core_contract() {
+        let tool = light_compute_tool_for_backend("monty");
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let memory = WorkingMemory::new();
+
+        let success = tool
+            .execute(
+                serde_json::json!({
+                    "code": "return { mean: hstack.mean(input.values), med: hstack.median(input.values), picked: hstack.pick(input.obj, ['a', 'c']) };",
+                    "input": { "values": [1, 2, 5, 8], "obj": { "a": 1, "b": 2, "c": 3 } }
+                }),
+                &world,
+                &memory,
+            )
+            .await;
+
+        let success_payload = extract_light_compute_payload(match success {
+            Ok(action) => action,
+            Err(e) => panic!("monty light_compute failed: {e}"),
+        });
+        assert_eq!(success_payload.get("ok").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(
+            success_payload
+                .get("result")
+                .and_then(|r| r.get("mean"))
+                .and_then(serde_json::Value::as_f64),
+            Some(4.0)
+        );
+        assert_eq!(
+            success_payload
+                .get("result")
+                .and_then(|r| r.get("med"))
+                .and_then(serde_json::Value::as_f64),
+            Some(3.5)
+        );
+        assert_eq!(
+            success_payload
+                .get("result")
+                .and_then(|r| r.get("picked"))
+                .and_then(|o| o.get("a"))
+                .and_then(serde_json::Value::as_i64),
+            Some(1)
+        );
+
+        let string_result = tool
+            .execute(
+                serde_json::json!({
+                    "code": "return hstack.replaceAll(hstack.trim(hstack.lower(input.txt)), 'world', 'hstack');",
+                    "input": { "txt": "  HeLLo WORLD  " }
+                }),
+                &world,
+                &memory,
+            )
+            .await;
+        let string_payload = extract_light_compute_payload(match string_result {
+            Ok(action) => action,
+            Err(e) => panic!("monty light_compute string helpers failed: {e}"),
+        });
+        assert_eq!(string_payload.get("result").and_then(serde_json::Value::as_str), Some("hello hstack"));
+
+        let timeout_result = tool
+            .execute(
+                serde_json::json!({
+                    "code": "while (true) {}"
+                }),
+                &world,
+                &memory,
+            )
+            .await;
+        let timeout_payload = extract_light_compute_payload(match timeout_result {
+            Ok(action) => action,
+            Err(e) => panic!("monty light_compute timeout failed: {e}"),
+        });
+        assert_eq!(
+            timeout_payload
+                .get("error")
+                .and_then(|e| e.get("type"))
+                .and_then(serde_json::Value::as_str),
+            Some("timeout")
         );
     }
 }

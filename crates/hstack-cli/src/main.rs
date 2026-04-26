@@ -542,7 +542,7 @@ where
                                         "start_live_directions",
                                         "create_countdown",
                                         "scratch_thought",
-                                        "exa_search",
+                                        "web_search",
                                         "light_compute",
                                         "manage_app",
                                         "inspect_app",
@@ -1069,7 +1069,6 @@ fn render_ui(f: &mut ratatui::Frame, app: &mut AppState) {
 
 fn apply_action_to_world(world: &mut FileBackedWorld, action: &SyncAction) -> Result<()> {
     use hstack_core::sync::SyncActionType;
-    use uuid::Uuid;
 
     match action.r#type {
         SyncActionType::Create => {

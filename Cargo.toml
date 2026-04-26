@@ -7,3 +7,6 @@ members = [
     "crates/hstack-agent",
     "crates/hstack-cli"
 ]
+
+[workspace.package]
+rust-version = "1.95"

@@ -58,17 +58,14 @@ impl AppId {
     }
 }
 
-pub fn exa_search_is_available() -> bool {
-    std::env::var("EXA_API_KEY")
-        .ok()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
+pub fn web_search_is_available() -> bool {
+    crate::tool::web_search_is_available()
 }
 
 pub fn app_is_available(app_id: AppId) -> bool {
     match app_id {
         AppId::Scratchpad | AppId::StackSearch | AppId::Compute => true,
-        AppId::WebSearch => exa_search_is_available(),
+        AppId::WebSearch => web_search_is_available(),
     }
 }
 
@@ -357,7 +354,7 @@ impl WorkspaceState {
                 app.query_history.push(query.clone());
                 app.results = results.clone();
                 let key = match app_id {
-                    AppId::WebSearch => format!("exa_search:{query}"),
+                    AppId::WebSearch => format!("web_search:{query}"),
                     AppId::StackSearch => format!("search_stack:{query}"),
                     _ => {
                         let label = app_id.label();

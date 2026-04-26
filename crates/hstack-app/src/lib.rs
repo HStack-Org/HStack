@@ -63,12 +63,20 @@ async fn chat_local(app: AppHandle, message: String, _history: Vec<Message>) -> 
             hstack_core::provider::ProviderKind::Gemini => Box::new(GeminiProvider::new(config.clone(), None)),
         };
 
-        let tools = hstack_agent::tool::compose_tools(&[
+        let mut tool_names = vec![
             "create_ticket", "delete_ticket", "delete_all_tickets", "edit_ticket",
-            "add_commute", "get_directions", "remove_commute", "start_live_directions", 
+            "add_commute", "get_directions", "remove_commute", "start_live_directions",
             "create_countdown", "identity", "follow_up", "search_stack", "scratch_thought",
-            "light_compute", "manage_app", "inspect_app", "scratchpad_search", "scratchpad_edit"
-        ]).unwrap_or_default();
+            "manage_app", "inspect_app", "scratchpad_search", "scratchpad_edit",
+        ];
+        if hstack_agent::tool::web_search_is_available() {
+            tool_names.push("web_search");
+        }
+        if hstack_agent::tool::light_compute_is_available() {
+            tool_names.push("light_compute");
+        }
+
+        let tools = hstack_agent::tool::compose_tools(&tool_names).unwrap_or_default();
         
         let agent = Agent {
             provider,

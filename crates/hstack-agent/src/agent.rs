@@ -554,9 +554,6 @@ fn insert_tool_contract_message_for_refs(messages: &mut Vec<Message>, tools: &[&
         content.push_str("]\n");
     }
     content.push_str("- Any other tool name is invalid and has no semantic effect.\n");
-    if !tool_names.contains(&"exa_search") {
-        content.push_str("- `exa_search` is not available in this turn. Do not call it.\n");
-    }
 
     let tool_contract = Message {
         role: Role::System,

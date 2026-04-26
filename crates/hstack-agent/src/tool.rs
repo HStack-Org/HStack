@@ -5,7 +5,6 @@ use crate::action::AgentAction;
 use crate::error::Error;
 use crate::memory::{HStackWorld, WorkingMemory};
 
-pub mod exa_search;
 pub mod follow_up;
 pub mod inspect_app;
 pub mod identity;
@@ -16,8 +15,8 @@ pub mod scratchpad_search;
 pub mod scratch_thought;
 pub mod search_stack;
 pub mod stack_proposals;
+pub mod web_search;
 
-pub use exa_search::ExaSearchTool;
 pub use follow_up::FollowUpTool;
 pub use inspect_app::InspectAppTool;
 pub use identity::IdentityTool;
@@ -32,6 +31,7 @@ pub use stack_proposals::{
     DeleteTicketTool, EditTicketTool, GetDirectionsTool, RemoveCommuteTool,
     StartLiveDirectionsTool,
 };
+pub use web_search::{web_search_is_available, WebSearchTool};
 
 /// The interface for all agentic tools.
 /// Tools produce an AgentAction (the transition function `a`).
@@ -45,6 +45,10 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, args: Value, world: &dyn HStackWorld, memory: &WorkingMemory) -> Result<AgentAction, Error>;
 }
 
+pub fn light_compute_is_available() -> bool {
+    true
+}
+
 /// Returns all built-in tool names available for composition.
 pub fn available_tools() -> &'static [&'static str] {
     &[
@@ -52,7 +56,7 @@ pub fn available_tools() -> &'static [&'static str] {
         "follow_up",
         "search_stack",
         "scratch_thought",
-        "exa_search",
+        "web_search",
         "light_compute",
         "manage_app",
         "inspect_app",
@@ -80,14 +84,18 @@ pub fn compose_tools(names: &[&str]) -> Result<Vec<Box<dyn Tool>>, Error> {
             "follow_up" => Box::new(FollowUpTool) as Box<dyn Tool>,
             "search_stack" => Box::new(SearchStack) as Box<dyn Tool>,
             "scratch_thought" => Box::new(ScratchThought) as Box<dyn Tool>,
-            "exa_search" => {
-                // Do not expose Exa search if credentials are unavailable.
-                if std::env::var("EXA_API_KEY").ok().filter(|v| !v.trim().is_empty()).is_none() {
+            "web_search" => {
+                if !web_search_is_available() {
                     continue;
                 }
-                Box::new(ExaSearchTool::new()) as Box<dyn Tool>
+                Box::new(WebSearchTool::new()?) as Box<dyn Tool>
             }
-            "light_compute" => Box::new(LightComputeTool::new()) as Box<dyn Tool>,
+            "light_compute" => {
+                if !light_compute_is_available() {
+                    continue;
+                }
+                Box::new(LightComputeTool::new()) as Box<dyn Tool>
+            }
             "manage_app" => Box::new(ManageAppTool) as Box<dyn Tool>,
             "inspect_app" => Box::new(InspectAppTool) as Box<dyn Tool>,
             "scratchpad_search" => Box::new(ScratchpadSearchTool) as Box<dyn Tool>,
