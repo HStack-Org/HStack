@@ -6,10 +6,14 @@ use crate::error::Error;
 use crate::memory::{HStackWorld, WorkingMemory};
 
 pub mod follow_up;
+pub mod editor_edit;
+pub mod filesystem_patch;
 pub mod inspect_app;
+pub mod execution_request;
 pub mod identity;
 pub mod light_compute;
 pub mod manage_app;
+pub mod microbash;
 pub mod scratchpad_edit;
 pub mod scratchpad_search;
 pub mod scratch_thought;
@@ -17,11 +21,15 @@ pub mod search_stack;
 pub mod stack_proposals;
 pub mod web_search;
 
+pub use editor_edit::EditorEditTool;
 pub use follow_up::FollowUpTool;
+pub use filesystem_patch::FilesystemPatchTool;
 pub use inspect_app::InspectAppTool;
+pub use execution_request::ExecutionRequestTool;
 pub use identity::IdentityTool;
 pub use light_compute::LightComputeTool;
 pub use manage_app::ManageAppTool;
+pub use microbash::MicrobashTool;
 pub use scratchpad_edit::ScratchpadEditTool;
 pub use scratchpad_search::ScratchpadSearchTool;
 pub use scratch_thought::ScratchThought;
@@ -60,7 +68,11 @@ pub fn available_tools() -> &'static [&'static str] {
         "light_compute",
         "manage_app",
         "inspect_app",
+        "editor_edit",
+        "microbash",
+        "filesystem_patch",
         "scratchpad_search",
+        "execution_request",
         "scratchpad_edit",
         "create_ticket",
         "delete_ticket",
@@ -98,7 +110,11 @@ pub fn compose_tools(names: &[&str]) -> Result<Vec<Box<dyn Tool>>, Error> {
             }
             "manage_app" => Box::new(ManageAppTool) as Box<dyn Tool>,
             "inspect_app" => Box::new(InspectAppTool) as Box<dyn Tool>,
+            "editor_edit" => Box::new(EditorEditTool::new()) as Box<dyn Tool>,
+            "microbash" => Box::new(MicrobashTool::new()) as Box<dyn Tool>,
+            "filesystem_patch" => Box::new(FilesystemPatchTool::new()) as Box<dyn Tool>,
             "scratchpad_search" => Box::new(ScratchpadSearchTool) as Box<dyn Tool>,
+            "execution_request" => Box::new(ExecutionRequestTool) as Box<dyn Tool>,
             "scratchpad_edit" => Box::new(ScratchpadEditTool) as Box<dyn Tool>,
             "create_ticket" => Box::new(CreateTicketTool) as Box<dyn Tool>,
             "delete_ticket" => Box::new(DeleteTicketTool) as Box<dyn Tool>,

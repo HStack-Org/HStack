@@ -23,7 +23,7 @@ impl Tool for InspectAppTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "app_id": { "type": "string", "enum": ["scratchpad", "websearch", "stack-search", "compute"] }
+                "app_id": { "type": "string", "enum": ["scratchpad", "websearch", "stack-search", "compute", "file-tree", "editor", "file-search", "jobs"] }
             },
             "required": ["app_id"]
         })
@@ -51,6 +51,10 @@ fn parse_app_id(value: Option<&Value>) -> Result<AppId, Error> {
         Some("websearch") => Ok(AppId::WebSearch),
         Some("stack-search") => Ok(AppId::StackSearch),
         Some("compute") => Ok(AppId::Compute),
+        Some("file-tree") => Ok(AppId::FileTree),
+        Some("editor") => Ok(AppId::Editor),
+        Some("file-search") => Ok(AppId::FileSearch),
+        Some("jobs") => Ok(AppId::Jobs),
         _ => Err(Error::Provider("inspect_app requires a valid 'app_id'".to_string())),
     }
 }

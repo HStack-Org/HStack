@@ -1,8 +1,10 @@
-use chrono::{DateTime, Duration, Utc, Local};
+use chrono::{DateTime, Duration, Local, Utc};
+use hstack_core::filesystem::{ConflictToken, DirectoryEntry, SearchMatch};
 use hstack_core::provider::{Message, Role};
+use hstack_core::settings::UserSettings;
 use hstack_core::sync::SyncAction;
 use hstack_core::ticket::{Ticket, TicketPayload, TicketPriority, TicketType};
-use hstack_core::settings::UserSettings;
+use hstack_core::virtual_fs::VirtualPath;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -45,6 +47,10 @@ pub enum AppId {
     WebSearch,
     StackSearch,
     Compute,
+    FileTree,
+    Editor,
+    FileSearch,
+    Jobs,
 }
 
 impl AppId {
@@ -54,6 +60,10 @@ impl AppId {
             AppId::WebSearch => "websearch",
             AppId::StackSearch => "stack-search",
             AppId::Compute => "compute",
+            AppId::FileTree => "file-tree",
+            AppId::Editor => "editor",
+            AppId::FileSearch => "file-search",
+            AppId::Jobs => "jobs",
         }
     }
 }
@@ -64,7 +74,13 @@ pub fn web_search_is_available() -> bool {
 
 pub fn app_is_available(app_id: AppId) -> bool {
     match app_id {
-        AppId::Scratchpad | AppId::StackSearch | AppId::Compute => true,
+        AppId::Scratchpad
+        | AppId::StackSearch
+        | AppId::Compute
+        | AppId::FileTree
+        | AppId::Editor
+        | AppId::FileSearch
+        | AppId::Jobs => true,
         AppId::WebSearch => web_search_is_available(),
     }
 }
@@ -231,6 +247,130 @@ impl Default for ComputeApp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileTreeApp {
+    pub lifecycle: AppLifecycle,
+    pub pinned: bool,
+    pub viewport: TextViewport,
+    pub cwd: VirtualPath,
+    pub entries: Vec<DirectoryEntry>,
+}
+
+impl Default for FileTreeApp {
+    fn default() -> Self {
+        Self {
+            lifecycle: AppLifecycle::InstalledClosed,
+            pinned: false,
+            viewport: TextViewport::new(0, 8),
+            cwd: VirtualPath::root(),
+            entries: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorBuffer {
+    pub path: VirtualPath,
+    pub conflict_token: Option<ConflictToken>,
+    pub lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EditorDiagnosticSeverity {
+    Hint,
+    Information,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorDiagnostic {
+    pub path: VirtualPath,
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+    pub severity: EditorDiagnosticSeverity,
+    pub source: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorApp {
+    pub lifecycle: AppLifecycle,
+    pub pinned: bool,
+    pub viewport: TextViewport,
+    pub cwd: VirtualPath,
+    pub buffer: Option<EditorBuffer>,
+    pub language_id: Option<String>,
+    pub diagnostics: Vec<EditorDiagnostic>,
+}
+
+impl Default for EditorApp {
+    fn default() -> Self {
+        Self {
+            lifecycle: AppLifecycle::InstalledClosed,
+            pinned: false,
+            viewport: TextViewport::new(0, 12),
+            cwd: VirtualPath::root(),
+            buffer: None,
+            language_id: None,
+            diagnostics: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FilesystemSearchApp {
+    pub lifecycle: AppLifecycle,
+    pub pinned: bool,
+    pub viewport: TextViewport,
+    pub query_history: Vec<String>,
+    pub focused_query: Option<String>,
+    pub scope_root: VirtualPath,
+    pub matches: Vec<SearchMatch>,
+}
+
+impl Default for FilesystemSearchApp {
+    fn default() -> Self {
+        Self {
+            lifecycle: AppLifecycle::InstalledClosed,
+            pinned: false,
+            viewport: TextViewport::new(0, 8),
+            query_history: Vec::new(),
+            focused_query: None,
+            scope_root: VirtualPath::root(),
+            matches: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobRecord {
+    pub summary: String,
+    pub state: String,
+    pub detail: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobApp {
+    pub lifecycle: AppLifecycle,
+    pub pinned: bool,
+    pub viewport: TextViewport,
+    pub history: Vec<JobRecord>,
+}
+
+impl Default for JobApp {
+    fn default() -> Self {
+        Self {
+            lifecycle: AppLifecycle::InstalledClosed,
+            pinned: false,
+            viewport: TextViewport::new(0, 6),
+            history: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NearEventItem {
     pub ticket_id: String,
     pub title: String,
@@ -242,10 +382,15 @@ pub struct NearEventItem {
 pub struct WorkspaceState {
     pub budget: ContextBudget,
     pub dock: DockState,
+    pub filesystem_cwd: VirtualPath,
     pub scratchpad: ScratchpadApp,
     pub web_search: SearchApp,
     pub stack_search: SearchApp,
     pub compute: ComputeApp,
+    pub file_tree: FileTreeApp,
+    pub editor: EditorApp,
+    pub file_search: FilesystemSearchApp,
+    pub jobs: JobApp,
     pub near_events: Vec<NearEventItem>,
 }
 
@@ -254,10 +399,15 @@ impl Default for WorkspaceState {
         Self {
             budget: ContextBudget::default(),
             dock: DockState::default(),
+            filesystem_cwd: VirtualPath::root(),
             scratchpad: ScratchpadApp::default(),
             web_search: SearchApp::new(AppId::WebSearch, SearchAppKind::Web),
             stack_search: SearchApp::new(AppId::StackSearch, SearchAppKind::Stack),
             compute: ComputeApp::default(),
+            file_tree: FileTreeApp::default(),
+            editor: EditorApp::default(),
+            file_search: FilesystemSearchApp::default(),
+            jobs: JobApp::default(),
             near_events: Vec::new(),
         }
     }
@@ -279,6 +429,30 @@ pub enum WorkspaceDelta {
     RecordCompute {
         summary: String,
         payload: Value,
+    },
+    PublishFilesystemTree {
+        cwd: VirtualPath,
+        entries: Vec<DirectoryEntry>,
+    },
+    PublishEditorBuffer {
+        path: VirtualPath,
+        conflict_token: Option<ConflictToken>,
+        content: String,
+    },
+    PublishEditorAnalysis {
+        path: VirtualPath,
+        language_id: Option<String>,
+        diagnostics: Vec<EditorDiagnostic>,
+    },
+    PublishFilesystemSearch {
+        query: String,
+        scope_root: VirtualPath,
+        matches: Vec<SearchMatch>,
+    },
+    RecordJob {
+        summary: String,
+        state: String,
+        detail: Value,
     },
     OpenApp(AppId),
     CloseApp(AppId),
@@ -380,6 +554,98 @@ impl WorkspaceState {
                     }
                 })
             }
+            WorkspaceDelta::PublishFilesystemTree { cwd, entries } => {
+                self.focus_app(AppId::FileTree);
+                self.filesystem_cwd = cwd.clone();
+                self.file_tree.cwd = cwd.clone();
+                self.file_tree.entries = entries.clone();
+                serde_json::json!({
+                    "filesystem_tree": {
+                        "cwd": cwd,
+                        "entries": entries,
+                    }
+                })
+            }
+            WorkspaceDelta::PublishEditorBuffer {
+                path,
+                conflict_token,
+                content,
+            } => {
+                self.focus_app(AppId::Editor);
+                let cwd = path.parent().unwrap_or_else(VirtualPath::root);
+                self.filesystem_cwd = cwd.clone();
+                self.editor.cwd = cwd;
+                self.editor.buffer = Some(EditorBuffer {
+                    path: path.clone(),
+                    conflict_token: conflict_token.clone(),
+                    lines: split_editor_content(&content),
+                });
+                if self.editor.language_id.is_none() {
+                    self.editor.language_id = infer_language_id(&path);
+                }
+                serde_json::json!({
+                    "editor": {
+                        "path": path,
+                        "conflict_token": conflict_token,
+                    }
+                })
+            }
+            WorkspaceDelta::PublishEditorAnalysis {
+                path,
+                language_id,
+                diagnostics,
+            } => {
+                if self.editor.buffer.as_ref().map(|buffer| &buffer.path) == Some(&path) {
+                    self.focus_app(AppId::Editor);
+                    self.editor.language_id = language_id.clone().or_else(|| infer_language_id(&path));
+                    self.editor.diagnostics = diagnostics.clone();
+                }
+                serde_json::json!({
+                    "editor_analysis": {
+                        "path": path,
+                        "language_id": language_id,
+                        "diagnostics": diagnostics,
+                    }
+                })
+            }
+            WorkspaceDelta::PublishFilesystemSearch {
+                query,
+                scope_root,
+                matches,
+            } => {
+                self.focus_app(AppId::FileSearch);
+                self.filesystem_cwd = scope_root.clone();
+                self.file_search.focused_query = Some(query.clone());
+                self.file_search.query_history.push(query.clone());
+                self.file_search.scope_root = scope_root.clone();
+                self.file_search.matches = matches.clone();
+                serde_json::json!({
+                    "filesystem_search": {
+                        "query": query,
+                        "scope_root": scope_root,
+                        "matches": matches,
+                    }
+                })
+            }
+            WorkspaceDelta::RecordJob {
+                summary,
+                state,
+                detail,
+            } => {
+                self.focus_app(AppId::Jobs);
+                self.jobs.history.push(JobRecord {
+                    summary: summary.clone(),
+                    state: state.clone(),
+                    detail: detail.clone(),
+                });
+                serde_json::json!({
+                    "jobs": {
+                        "summary": summary,
+                        "state": state,
+                        "detail": detail,
+                    }
+                })
+            }
             WorkspaceDelta::OpenApp(app_id) => {
                 if !app_is_available(app_id) {
                     return serde_json::json!({ "workspace_error": { "reason": "unavailable_app", "app_id": app_id.label() } });
@@ -458,6 +724,10 @@ impl WorkspaceState {
         candidates.extend(self.candidates_for_search(&self.web_search));
         candidates.extend(self.candidates_for_search(&self.stack_search));
         candidates.extend(self.candidates_for_compute());
+        candidates.extend(self.candidates_for_file_tree());
+        candidates.extend(self.candidates_for_editor());
+        candidates.extend(self.candidates_for_filesystem_search());
+        candidates.extend(self.candidates_for_jobs());
 
         let selected = solve_viewport_selection(&candidates, self.budget.app_budget);
         let mounted_apps: BTreeSet<AppId> = selected.iter().map(|candidate| candidate.app_id).collect();
@@ -500,6 +770,42 @@ impl WorkspaceState {
                 "viewport": self.compute.viewport,
                 "visible": self.visible_compute_records(),
             }),
+            AppId::FileTree => serde_json::json!({
+                "app_id": app_id.label(),
+                "lifecycle": format!("{:?}", self.file_tree.lifecycle),
+                "pinned": self.file_tree.pinned,
+                "viewport": self.file_tree.viewport,
+                "cwd": self.file_tree.cwd,
+                "visible": self.visible_file_tree_lines(),
+            }),
+            AppId::Editor => serde_json::json!({
+                "app_id": app_id.label(),
+                "lifecycle": format!("{:?}", self.editor.lifecycle),
+                "pinned": self.editor.pinned,
+                "viewport": self.editor.viewport,
+                "cwd": self.editor.cwd,
+                "path": self.editor.buffer.as_ref().map(|buffer| buffer.path.clone()),
+                "conflict_token": self.editor.buffer.as_ref().and_then(|buffer| buffer.conflict_token.clone()),
+                "language_id": self.editor.language_id,
+                "diagnostics": self.editor.diagnostics,
+                "visible": self.visible_editor_lines(),
+            }),
+            AppId::FileSearch => serde_json::json!({
+                "app_id": app_id.label(),
+                "lifecycle": format!("{:?}", self.file_search.lifecycle),
+                "pinned": self.file_search.pinned,
+                "viewport": self.file_search.viewport,
+                "scope_root": self.file_search.scope_root,
+                "focused_query": self.file_search.focused_query,
+                "visible": self.visible_file_search_records(),
+            }),
+            AppId::Jobs => serde_json::json!({
+                "app_id": app_id.label(),
+                "lifecycle": format!("{:?}", self.jobs.lifecycle),
+                "pinned": self.jobs.pinned,
+                "viewport": self.jobs.viewport,
+                "visible": self.visible_job_records(),
+            }),
         }
     }
 
@@ -523,7 +829,8 @@ impl WorkspaceState {
     }
 
     pub fn visible_scratchpad_lines(&self) -> Vec<String> {
-        visible_lines(&self.scratchpad.document_lines, self.scratchpad.viewport)
+        let lines = numbered_content_lines(&self.scratchpad.document_lines);
+        visible_lines(&lines, self.scratchpad.viewport)
     }
 
     pub fn visible_compute_records(&self) -> Vec<String> {
@@ -540,6 +847,31 @@ impl WorkspaceState {
         visible_lines(&lines, self.compute.viewport)
     }
 
+    pub fn visible_file_tree_lines(&self) -> Vec<String> {
+        let lines = file_tree_lines(&self.file_tree);
+        visible_lines(&lines, self.file_tree.viewport)
+    }
+
+    pub fn visible_editor_lines(&self) -> Vec<String> {
+        let lines = editor_lines(&self.editor);
+        visible_lines(&lines, self.editor.viewport)
+    }
+
+    pub fn visible_file_search_records(&self) -> Vec<String> {
+        let lines = file_search_lines(&self.file_search);
+        visible_lines(&lines, self.file_search.viewport)
+    }
+
+    pub fn visible_job_records(&self) -> Vec<String> {
+        let lines: Vec<String> = self
+            .jobs
+            .history
+            .iter()
+            .map(|record| format!("{} :: {} :: {}", record.summary, record.state, record.detail))
+            .collect();
+        visible_lines(&lines, self.jobs.viewport)
+    }
+
     pub fn render_short_term_messages(&self, messages: &[Message]) -> Vec<Message> {
         retain_short_term_messages(messages, self.budget.short_term_budget)
     }
@@ -550,6 +882,10 @@ impl WorkspaceState {
             self.render_dock_entry(AppId::WebSearch, self.web_search.lifecycle, self.web_search.pinned, mounted_apps.contains(&AppId::WebSearch)),
             self.render_dock_entry(AppId::StackSearch, self.stack_search.lifecycle, self.stack_search.pinned, mounted_apps.contains(&AppId::StackSearch)),
             self.render_dock_entry(AppId::Compute, self.compute.lifecycle, self.compute.pinned, mounted_apps.contains(&AppId::Compute)),
+            self.render_dock_entry(AppId::FileTree, self.file_tree.lifecycle, self.file_tree.pinned, mounted_apps.contains(&AppId::FileTree)),
+            self.render_dock_entry(AppId::Editor, self.editor.lifecycle, self.editor.pinned, mounted_apps.contains(&AppId::Editor)),
+            self.render_dock_entry(AppId::FileSearch, self.file_search.lifecycle, self.file_search.pinned, mounted_apps.contains(&AppId::FileSearch)),
+            self.render_dock_entry(AppId::Jobs, self.jobs.lifecycle, self.jobs.pinned, mounted_apps.contains(&AppId::Jobs)),
         ];
 
         let pinned_apps = self.collect_apps(|app_id| self.is_pinned(app_id));
@@ -618,6 +954,10 @@ impl WorkspaceState {
             AppId::WebSearch => self.web_search.lifecycle,
             AppId::StackSearch => self.stack_search.lifecycle,
             AppId::Compute => self.compute.lifecycle,
+            AppId::FileTree => self.file_tree.lifecycle,
+            AppId::Editor => self.editor.lifecycle,
+            AppId::FileSearch => self.file_search.lifecycle,
+            AppId::Jobs => self.jobs.lifecycle,
         }
     }
 
@@ -627,6 +967,10 @@ impl WorkspaceState {
             AppId::WebSearch => self.web_search.pinned,
             AppId::StackSearch => self.stack_search.pinned,
             AppId::Compute => self.compute.pinned,
+            AppId::FileTree => self.file_tree.pinned,
+            AppId::Editor => self.editor.pinned,
+            AppId::FileSearch => self.file_search.pinned,
+            AppId::Jobs => self.jobs.pinned,
         }
     }
 
@@ -634,7 +978,7 @@ impl WorkspaceState {
     where
         F: Fn(AppId) -> bool,
     {
-        [AppId::Scratchpad, AppId::WebSearch, AppId::StackSearch, AppId::Compute]
+        all_app_ids()
             .into_iter()
             .filter(|app_id| app_is_available(*app_id))
             .filter(|app_id| predicate(*app_id))
@@ -681,6 +1025,30 @@ impl WorkspaceState {
             self.dock.focused_app,
             &self.dock.mounted_apps,
         );
+        sync_app_mount_state(
+            &mut self.file_tree.lifecycle,
+            AppId::FileTree,
+            self.dock.focused_app,
+            &self.dock.mounted_apps,
+        );
+        sync_app_mount_state(
+            &mut self.editor.lifecycle,
+            AppId::Editor,
+            self.dock.focused_app,
+            &self.dock.mounted_apps,
+        );
+        sync_app_mount_state(
+            &mut self.file_search.lifecycle,
+            AppId::FileSearch,
+            self.dock.focused_app,
+            &self.dock.mounted_apps,
+        );
+        sync_app_mount_state(
+            &mut self.jobs.lifecycle,
+            AppId::Jobs,
+            self.dock.focused_app,
+            &self.dock.mounted_apps,
+        );
     }
 
     fn open_app(&mut self, app_id: AppId) {
@@ -689,6 +1057,10 @@ impl WorkspaceState {
             AppId::WebSearch => self.web_search.lifecycle = AppLifecycle::OpenUnmounted,
             AppId::StackSearch => self.stack_search.lifecycle = AppLifecycle::OpenUnmounted,
             AppId::Compute => self.compute.lifecycle = AppLifecycle::OpenUnmounted,
+            AppId::FileTree => self.file_tree.lifecycle = AppLifecycle::OpenUnmounted,
+            AppId::Editor => self.editor.lifecycle = AppLifecycle::OpenUnmounted,
+            AppId::FileSearch => self.file_search.lifecycle = AppLifecycle::OpenUnmounted,
+            AppId::Jobs => self.jobs.lifecycle = AppLifecycle::OpenUnmounted,
         }
     }
 
@@ -702,6 +1074,10 @@ impl WorkspaceState {
             AppId::WebSearch => self.web_search.lifecycle = AppLifecycle::InstalledClosed,
             AppId::StackSearch => self.stack_search.lifecycle = AppLifecycle::InstalledClosed,
             AppId::Compute => self.compute.lifecycle = AppLifecycle::InstalledClosed,
+            AppId::FileTree => self.file_tree.lifecycle = AppLifecycle::InstalledClosed,
+            AppId::Editor => self.editor.lifecycle = AppLifecycle::InstalledClosed,
+            AppId::FileSearch => self.file_search.lifecycle = AppLifecycle::InstalledClosed,
+            AppId::Jobs => self.jobs.lifecycle = AppLifecycle::InstalledClosed,
         }
 
         if self.dock.focused_app == app_id {
@@ -717,6 +1093,10 @@ impl WorkspaceState {
             AppId::WebSearch => self.web_search.lifecycle = AppLifecycle::OpenMountedFocused,
             AppId::StackSearch => self.stack_search.lifecycle = AppLifecycle::OpenMountedFocused,
             AppId::Compute => self.compute.lifecycle = AppLifecycle::OpenMountedFocused,
+            AppId::FileTree => self.file_tree.lifecycle = AppLifecycle::OpenMountedFocused,
+            AppId::Editor => self.editor.lifecycle = AppLifecycle::OpenMountedFocused,
+            AppId::FileSearch => self.file_search.lifecycle = AppLifecycle::OpenMountedFocused,
+            AppId::Jobs => self.jobs.lifecycle = AppLifecycle::OpenMountedFocused,
         }
     }
 
@@ -726,6 +1106,10 @@ impl WorkspaceState {
             AppId::WebSearch => self.web_search.pinned = pinned,
             AppId::StackSearch => self.stack_search.pinned = pinned,
             AppId::Compute => self.compute.pinned = pinned,
+            AppId::FileTree => self.file_tree.pinned = pinned,
+            AppId::Editor => self.editor.pinned = pinned,
+            AppId::FileSearch => self.file_search.pinned = pinned,
+            AppId::Jobs => self.jobs.pinned = pinned,
         }
     }
 
@@ -747,6 +1131,22 @@ impl WorkspaceState {
                 let total = self.compute.history.len().max(1);
                 self.compute.viewport = scroll_viewport(self.compute.viewport, delta, total);
             }
+            AppId::FileTree => {
+                let total = file_tree_lines(&self.file_tree).len().max(1);
+                self.file_tree.viewport = scroll_viewport(self.file_tree.viewport, delta, total);
+            }
+            AppId::Editor => {
+                let total = editor_lines(&self.editor).len().max(1);
+                self.editor.viewport = scroll_viewport(self.editor.viewport, delta, total);
+            }
+            AppId::FileSearch => {
+                let total = file_search_lines(&self.file_search).len().max(1);
+                self.file_search.viewport = scroll_viewport(self.file_search.viewport, delta, total);
+            }
+            AppId::Jobs => {
+                let total = self.jobs.history.len().max(1);
+                self.jobs.viewport = scroll_viewport(self.jobs.viewport, delta, total);
+            }
         }
     }
 
@@ -755,6 +1155,10 @@ impl WorkspaceState {
         self.web_search.lifecycle = demote_focus(self.web_search.lifecycle);
         self.stack_search.lifecycle = demote_focus(self.stack_search.lifecycle);
         self.compute.lifecycle = demote_focus(self.compute.lifecycle);
+        self.file_tree.lifecycle = demote_focus(self.file_tree.lifecycle);
+        self.editor.lifecycle = demote_focus(self.editor.lifecycle);
+        self.file_search.lifecycle = demote_focus(self.file_search.lifecycle);
+        self.jobs.lifecycle = demote_focus(self.jobs.lifecycle);
     }
 
     fn candidates_for_scratchpad(&self) -> Vec<ViewportCandidate> {
@@ -825,6 +1229,78 @@ impl WorkspaceState {
             self.compute.viewport,
             "COMPUTE",
             priority_class(self.dock.focused_app, AppId::Compute),
+        )
+    }
+
+    fn candidates_for_file_tree(&self) -> Vec<ViewportCandidate> {
+        if !self.file_tree.lifecycle.is_open() {
+            return Vec::new();
+        }
+
+        let lines = file_tree_lines(&self.file_tree);
+        build_text_candidates(
+            AppId::FileTree,
+            self.file_tree.lifecycle,
+            self.file_tree.pinned,
+            &lines,
+            self.file_tree.viewport,
+            "FILE TREE",
+            priority_class(self.dock.focused_app, AppId::FileTree),
+        )
+    }
+
+    fn candidates_for_editor(&self) -> Vec<ViewportCandidate> {
+        if !self.editor.lifecycle.is_open() {
+            return Vec::new();
+        }
+
+        let lines = editor_lines(&self.editor);
+        build_text_candidates(
+            AppId::Editor,
+            self.editor.lifecycle,
+            self.editor.pinned,
+            &lines,
+            self.editor.viewport,
+            "EDITOR",
+            priority_class(self.dock.focused_app, AppId::Editor),
+        )
+    }
+
+    fn candidates_for_filesystem_search(&self) -> Vec<ViewportCandidate> {
+        if !self.file_search.lifecycle.is_open() {
+            return Vec::new();
+        }
+
+        let lines = file_search_lines(&self.file_search);
+        build_text_candidates(
+            AppId::FileSearch,
+            self.file_search.lifecycle,
+            self.file_search.pinned,
+            &lines,
+            self.file_search.viewport,
+            "FILE SEARCH",
+            priority_class(self.dock.focused_app, AppId::FileSearch),
+        )
+    }
+
+    fn candidates_for_jobs(&self) -> Vec<ViewportCandidate> {
+        if !self.jobs.lifecycle.is_open() {
+            return Vec::new();
+        }
+
+        let mut lines = vec![format!("cwd: {}", self.filesystem_cwd)];
+        for record in &self.jobs.history {
+            lines.push(format!("{} :: {} :: {}", record.summary, record.state, record.detail));
+        }
+
+        build_text_candidates(
+            AppId::Jobs,
+            self.jobs.lifecycle,
+            self.jobs.pinned,
+            &lines,
+            self.jobs.viewport,
+            "JOBS",
+            priority_class(self.dock.focused_app, AppId::Jobs),
         )
     }
 }
@@ -1051,6 +1527,27 @@ pub fn workspace_runtime_snapshot(memory: &crate::memory::WorkingMemory) -> Valu
                 "lifecycle": format!("{:?}", memory.workspace.compute.lifecycle),
                 "history": memory.workspace.compute.history.len(),
             },
+            "file_tree": {
+                "lifecycle": format!("{:?}", memory.workspace.file_tree.lifecycle),
+                "cwd": memory.workspace.file_tree.cwd,
+                "entries": memory.workspace.file_tree.entries.len(),
+            },
+            "editor": {
+                "lifecycle": format!("{:?}", memory.workspace.editor.lifecycle),
+                "cwd": memory.workspace.editor.cwd,
+                "has_buffer": memory.workspace.editor.buffer.is_some(),
+                "language_id": memory.workspace.editor.language_id,
+                "diagnostics": memory.workspace.editor.diagnostics.len(),
+            },
+            "file_search": {
+                "lifecycle": format!("{:?}", memory.workspace.file_search.lifecycle),
+                "scope_root": memory.workspace.file_search.scope_root,
+                "matches": memory.workspace.file_search.matches.len(),
+            },
+            "jobs": {
+                "lifecycle": format!("{:?}", memory.workspace.jobs.lifecycle),
+                "history": memory.workspace.jobs.history.len(),
+            },
         }
     })
 }
@@ -1119,7 +1616,7 @@ fn solve_viewport_selection(candidates: &[ViewportCandidate], budget: usize) -> 
     let mut app_groups: Vec<Vec<ViewportCandidate>> = Vec::new();
     let mut min_mandatory_cost = 0;
 
-    for app_id in [AppId::Scratchpad, AppId::WebSearch, AppId::StackSearch, AppId::Compute] {
+    for app_id in all_app_ids() {
         let app_candidates: Vec<ViewportCandidate> = candidates
             .iter()
             .filter(|candidate| candidate.app_id == app_id)
@@ -1225,6 +1722,102 @@ fn visible_lines(lines: &[String], viewport: TextViewport) -> Vec<String> {
     let clamped = viewport.clamp(lines.len());
     let end = (clamped.start_line + clamped.line_count).min(lines.len());
     lines[clamped.start_line..end].to_vec()
+}
+
+fn all_app_ids() -> [AppId; 8] {
+    [
+        AppId::Scratchpad,
+        AppId::WebSearch,
+        AppId::StackSearch,
+        AppId::Compute,
+        AppId::FileTree,
+        AppId::Editor,
+        AppId::FileSearch,
+        AppId::Jobs,
+    ]
+}
+
+fn file_tree_lines(app: &FileTreeApp) -> Vec<String> {
+    let mut lines = vec![format!("cwd: {}", app.cwd)];
+    for entry in &app.entries {
+        lines.push(format!("{} :: {:?}", entry.path, entry.kind));
+    }
+    lines
+}
+
+fn editor_lines(app: &EditorApp) -> Vec<String> {
+    let mut lines = vec![format!("cwd: {}", app.cwd)];
+    if let Some(buffer) = &app.buffer {
+        lines.push(format!("path: {}", buffer.path));
+        lines.push(format!(
+            "language_id: {}",
+            app.language_id.clone().unwrap_or_else(|| "unknown".to_string())
+        ));
+        lines.push(format!(
+            "conflict_token: {}",
+            buffer
+                .conflict_token
+                .as_ref()
+                .map(|token| token.0.clone())
+                .unwrap_or_else(|| "none".to_string())
+        ));
+        lines.push(format!("diagnostics: {}", app.diagnostics.len()));
+        lines.extend(numbered_content_lines(&buffer.lines));
+    } else {
+        lines.push("buffer: empty".to_string());
+    }
+    lines
+}
+
+fn file_search_lines(app: &FilesystemSearchApp) -> Vec<String> {
+    let mut lines = vec![format!("scope: {}", app.scope_root)];
+    if let Some(query) = &app.focused_query {
+        lines.push(format!("query: {}", query));
+    }
+    for item in &app.matches {
+        let line = item.line.unwrap_or(0);
+        let column = item.column.unwrap_or(0);
+        lines.push(format!("{}:{}:{} :: {}", item.path, line, column, item.excerpt));
+    }
+    lines
+}
+
+fn split_editor_content(content: &str) -> Vec<String> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    if content.ends_with('\n') {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn numbered_content_lines(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| format!("{index} | {line}"))
+        .collect()
+}
+
+fn infer_language_id(path: &VirtualPath) -> Option<String> {
+    let name = path.file_name()?;
+    let (_, extension) = name.rsplit_once('.')?;
+    let language_id = match extension {
+        "rs" => "rust",
+        "ts" => "typescript",
+        "tsx" => "typescriptreact",
+        "js" => "javascript",
+        "jsx" => "javascriptreact",
+        "json" => "json",
+        "md" => "markdown",
+        "py" => "python",
+        "toml" => "toml",
+        "yaml" | "yml" => "yaml",
+        _ => return None,
+    };
+    Some(language_id.to_string())
 }
 
 fn inspect_search_app(app: &SearchApp) -> Value {

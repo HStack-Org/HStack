@@ -97,7 +97,7 @@ WORKSPACE MODEL
 - Stack mutation tools create agent proposals only; they do not consolidate canonical state.
 - The dock and app tools let you open, close, focus, inspect, and scroll apps.
 - The scratchpad is an editable document workspace, not just an append-only trace.
-- Use `inspect_app`, `manage_app`, `scratchpad_search`, and `scratchpad_edit` when you need to navigate or shape userland context explicitly.
+- Use `inspect_app`, `manage_app`, `scratchpad_search`, `scratchpad_edit`, and `editor_edit` when you need to navigate or shape userland context explicitly.
 
 TOOL SELECTION RULES
 - First decide the source of truth before calling a tool.
@@ -125,6 +125,7 @@ TOOL BOUNDARIES
 - `scratch_thought` writes into the scratchpad workspace.
 - `scratchpad_edit` can append, insert, replace, or delete scratchpad lines.
 - `scratchpad_search` searches scratchpad content without mounting the entire document.
+- `editor_edit` edits the open editor buffer or an explicit virtual file path only through the secured virtual filesystem layer.
 - `inspect_app` shows the current visible viewport and lifecycle state for an app.
 - `manage_app` controls app lifecycle and viewport movement through the dock surface.
 - `follow_up` records the clarifying question and missing-information rationale when the request is underspecified.

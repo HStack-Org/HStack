@@ -14,6 +14,9 @@
 // Review docs/public-private-contract.md before expanding shared models or APIs.
 pub mod provider;
 pub mod chat;
+pub mod execution;
+pub mod filesystem;
+pub mod filesystem_error;
 pub mod ticket;
 pub mod sync;
 pub mod stack_snapshot;
@@ -25,3 +28,4 @@ pub mod temporal_parser;
 pub mod api_models;
 pub mod integration;
 pub mod voice;
+pub mod virtual_fs;

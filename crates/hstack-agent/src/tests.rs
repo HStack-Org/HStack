@@ -6,7 +6,7 @@ mod tests {
     use crate::manager::{ContextManager, SimpleContextManager};
     use crate::control::AllowAllControl;
     use crate::provider::{LlmProvider, Message, Role};
-    use crate::tool::{compose_tools, CreateTicketTool, FollowUpTool, IdentityTool, InspectAppTool, LightComputeTool, ManageAppTool, ScratchThought, ScratchpadEditTool, ScratchpadSearchTool, SearchStack, Tool, WebSearchTool};
+    use crate::tool::{compose_tools, CreateTicketTool, EditorEditTool, ExecutionRequestTool, FilesystemPatchTool, FollowUpTool, IdentityTool, InspectAppTool, LightComputeTool, ManageAppTool, MicrobashTool, ScratchThought, ScratchpadEditTool, ScratchpadSearchTool, SearchStack, Tool, WebSearchTool};
     use crate::workspace::{compose_workspace_system_message, render_workspace_projection, short_term_messages, AppId, AppLifecycle, WorkspaceDelta};
     use crate::action::{AgentAction, WorkingMemoryDelta};
     use crate::error::Error;
@@ -14,7 +14,10 @@ mod tests {
     use hstack_core::sync::{SyncAction, SyncActionType};
     use hstack_core::ticket::{Ticket, TicketPayload, TicketPriority, TicketType};
     use async_trait::async_trait;
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
 
     struct MockProvider {
         pub responses: Arc<Mutex<Vec<Message>>>,
@@ -32,6 +35,70 @@ mod tests {
         let mut deltas = Vec::new();
         if let Err(e) = agent.apply_action(action, &world, memory, &mut deltas).await {
             panic!("apply_action failed: {e}");
+        }
+    }
+
+    fn temp_sandbox_root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("hstack-agent-tool-{}", Uuid::new_v4()));
+        if let Err(e) = fs::create_dir_all(&root) {
+            panic!("failed to create temp sandbox root: {e}");
+        }
+        root
+    }
+
+    fn find_tool<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> &'a dyn Tool {
+        tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .map(|tool| tool.as_ref())
+            .unwrap_or_else(|| panic!("tool '{name}' was not configured for the scenario"))
+    }
+
+    async fn run_scripted_tool_step(
+        tools: &[Box<dyn Tool>],
+        name: &str,
+        args: serde_json::Value,
+        world: &dyn crate::memory::HStackWorld,
+        memory: &mut WorkingMemory,
+    ) -> AgentAction {
+        let action = match find_tool(tools, name).execute(args, world, memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("scenario step '{name}' failed: {e}"),
+        };
+        apply_action_for_test(memory, action.clone()).await;
+        action
+    }
+
+    fn extract_job_handle(memory: &WorkingMemory) -> String {
+        memory
+            .workspace
+            .jobs
+            .history
+            .last()
+            .and_then(|record| record.detail.get("status"))
+            .and_then(|status| status.get("handle"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| panic!("expected execution handle in job history"))
+    }
+
+    fn extract_inspect_payload(action: AgentAction, expected_key: &str) -> serde_json::Value {
+        match action {
+            AgentAction::UpdateWorkingMemory(WorkingMemoryDelta::AddTechnicalNoise(key, payload)) => {
+                assert_eq!(key, expected_key);
+                payload
+            }
+            AgentAction::Compound(actions) => {
+                for action in actions {
+                    if let AgentAction::UpdateWorkingMemory(WorkingMemoryDelta::AddTechnicalNoise(key, payload)) = action {
+                        if key == expected_key {
+                            return payload;
+                        }
+                    }
+                }
+                panic!("expected technical payload '{expected_key}' in inspect action");
+            }
+            other => panic!("unexpected action returned when extracting inspect payload: {other:?}"),
         }
     }
 
@@ -1247,7 +1314,7 @@ mod tests {
 
         let edit_action = match edit_tool.execute(serde_json::json!({
             "operation": "append",
-            "new_lines": ["important note for later"]
+            "replacement_text": "important note for later"
         }), &world, &memory).await {
             Ok(action) => action,
             Err(e) => panic!("scratchpad_edit failed: {e}"),
@@ -1286,9 +1353,9 @@ mod tests {
 
         let replace_action = match edit_tool.execute(serde_json::json!({
             "operation": "replace",
-            "start_line": 1,
-            "delete_count": 2,
-            "new_lines": ["beta-1", "beta-2"]
+            "row_start": 1,
+            "row_end": 3,
+            "replacement_text": "beta-1\nbeta-2"
         }), &world, &memory).await {
             Ok(action) => action,
             Err(e) => panic!("scratchpad_edit replace failed: {e}"),
@@ -1306,8 +1373,8 @@ mod tests {
 
         let insert_action = match edit_tool.execute(serde_json::json!({
             "operation": "insert",
-            "start_line": 3,
-            "new_lines": ["inserted"]
+            "row_start": 3,
+            "replacement_text": "inserted"
         }), &world, &memory).await {
             Ok(action) => action,
             Err(e) => panic!("scratchpad_edit insert failed: {e}"),
@@ -1317,8 +1384,8 @@ mod tests {
 
         let delete_action = match edit_tool.execute(serde_json::json!({
             "operation": "delete",
-            "start_line": 2,
-            "delete_count": 2
+            "row_start": 2,
+            "row_end": 4
         }), &world, &memory).await {
             Ok(action) => action,
             Err(e) => panic!("scratchpad_edit delete failed: {e}"),
@@ -1335,7 +1402,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scratchpad_edit_rejects_non_string_new_lines() {
+    async fn test_scratchpad_edit_rejects_legacy_new_lines_payload() {
         let edit_tool = ScratchpadEditTool;
         let world = InMemoryWorld { tickets: Vec::new() };
         let memory = WorkingMemory::new();
@@ -1344,12 +1411,12 @@ mod tests {
             "operation": "append",
             "new_lines": ["ok", 42]
         }), &world, &memory).await {
-            Ok(_) => panic!("expected scratchpad_edit to reject non-string new_lines"),
+            Ok(_) => panic!("expected scratchpad_edit to reject legacy new_lines payload"),
             Err(e) => e,
         };
 
         match err {
-            Error::Provider(msg) => assert!(msg.contains("scratchpad_edit 'new_lines' must contain strings")),
+            Error::Provider(msg) => assert!(msg.contains("scratchpad_edit requires string 'replacement_text'")),
             _ => panic!("unexpected error type from scratchpad_edit"),
         }
     }
@@ -1398,6 +1465,818 @@ mod tests {
             Error::Provider(msg) => assert!(msg.contains("inspect_app requires a valid 'app_id'")),
             _ => panic!("unexpected error type from inspect_app"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_microbash_list_updates_file_tree_app() {
+        let sandbox_root = temp_sandbox_root();
+        if let Err(e) = fs::write(sandbox_root.join("alpha.txt"), b"alpha\n") {
+            panic!("failed to seed sandbox file: {e}");
+        }
+
+        let tool = MicrobashTool::new_for_tests(sandbox_root.clone());
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let mut memory = WorkingMemory::new();
+
+        let action = match tool.execute(serde_json::json!({ "command": "ls /" }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("microbash list failed: {e}"),
+        };
+        apply_action_for_test(&mut memory, action).await;
+
+        assert_eq!(memory.workspace.dock.focused_app, AppId::FileTree);
+        assert_eq!(memory.workspace.file_tree.cwd.as_str(), "/");
+        assert!(memory.workspace.file_tree.entries.iter().any(|entry| entry.name == "alpha.txt"));
+        assert!(!memory.workspace.jobs.history.is_empty());
+
+        let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[tokio::test]
+    async fn test_microbash_cat_updates_editor_app() {
+        let sandbox_root = temp_sandbox_root();
+        let nested = sandbox_root.join("docs");
+        if let Err(e) = fs::create_dir_all(&nested) {
+            panic!("failed to create nested sandbox dir: {e}");
+        }
+        if let Err(e) = fs::write(nested.join("readme.txt"), b"hello\nworld\n") {
+            panic!("failed to seed sandbox file: {e}");
+        }
+
+        let tool = MicrobashTool::new_for_tests(sandbox_root.clone());
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let mut memory = WorkingMemory::new();
+
+        let ls_action = match tool.execute(serde_json::json!({ "command": "ls /docs" }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("microbash ls failed: {e}"),
+        };
+        apply_action_for_test(&mut memory, ls_action).await;
+
+        let cat_action = match tool.execute(serde_json::json!({ "command": "cat readme.txt" }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("microbash cat failed: {e}"),
+        };
+        apply_action_for_test(&mut memory, cat_action).await;
+
+        assert_eq!(memory.workspace.dock.focused_app, AppId::Editor);
+        let buffer = memory.workspace.editor.buffer.as_ref().unwrap_or_else(|| panic!("expected editor buffer"));
+        assert_eq!(buffer.path.as_str(), "/docs/readme.txt");
+        assert!(buffer.lines.iter().any(|line| line == "hello"));
+
+        let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[tokio::test]
+    async fn test_microbash_search_updates_file_search_app() {
+        let sandbox_root = temp_sandbox_root();
+        if let Err(e) = fs::write(sandbox_root.join("notes.txt"), b"needle here\n") {
+            panic!("failed to seed sandbox file: {e}");
+        }
+
+        let tool = MicrobashTool::new_for_tests(sandbox_root.clone());
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let mut memory = WorkingMemory::new();
+
+        let action = match tool.execute(serde_json::json!({ "command": "grep needle /" }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("microbash grep failed: {e}"),
+        };
+        apply_action_for_test(&mut memory, action).await;
+
+        assert_eq!(memory.workspace.dock.focused_app, AppId::FileSearch);
+        assert_eq!(memory.workspace.file_search.focused_query.as_deref(), Some("needle"));
+        assert_eq!(memory.workspace.file_search.matches.len(), 1);
+
+        let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[tokio::test]
+    async fn test_filesystem_patch_tool_updates_editor_buffer() {
+        let sandbox_root = temp_sandbox_root();
+        if let Err(e) = fs::write(sandbox_root.join("patch.txt"), b"alpha\nbeta\n") {
+            panic!("failed to seed sandbox file: {e}");
+        }
+
+        let tool = FilesystemPatchTool::new_for_tests(sandbox_root.clone());
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let mut memory = WorkingMemory::new();
+
+        let action = match tool.execute(serde_json::json!({
+            "operation": "replace",
+            "path": "/patch.txt",
+            "row_start": 1,
+            "row_end": 2,
+            "replacement_text": "beta-2\nbeta-3"
+        }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("filesystem_patch failed: {e}"),
+        };
+        apply_action_for_test(&mut memory, action).await;
+
+        assert_eq!(memory.workspace.dock.focused_app, AppId::FileTree);
+        let buffer = memory.workspace.editor.buffer.as_ref().unwrap_or_else(|| panic!("expected editor buffer"));
+        assert!(buffer.lines.iter().any(|line| line == "beta-2"));
+        assert!(buffer.lines.iter().any(|line| line == "beta-3"));
+
+        let content = match fs::read_to_string(sandbox_root.join("patch.txt")) {
+            Ok(content) => content,
+            Err(e) => panic!("failed to read patched file: {e}"),
+        };
+        assert_eq!(content, "alpha\nbeta-2\nbeta-3\n");
+
+        let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[tokio::test]
+    async fn test_filesystem_patch_rejects_legacy_line_patch_payload() {
+        let sandbox_root = temp_sandbox_root();
+        if let Err(e) = fs::write(sandbox_root.join("patch.txt"), b"alpha\nbeta\n") {
+            panic!("failed to seed sandbox file: {e}");
+        }
+
+        let tool = FilesystemPatchTool::new_for_tests(sandbox_root.clone());
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let memory = WorkingMemory::new();
+
+        let err = match tool.execute(serde_json::json!({
+            "path": "/patch.txt",
+            "start_line": 1,
+            "delete_count": 1,
+            "new_lines": ["beta-2"]
+        }), &world, &memory).await {
+            Ok(_) => panic!("expected filesystem_patch to reject legacy line patch payload"),
+            Err(e) => e,
+        };
+
+        match err {
+            Error::Provider(msg) => assert!(msg.contains("filesystem_patch requires an 'operation' string")),
+            _ => panic!("unexpected error type from filesystem_patch"),
+        }
+
+        let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[tokio::test]
+    async fn test_editor_edit_tool_updates_open_buffer_via_virtual_fs() {
+        let sandbox_root = temp_sandbox_root();
+        if let Err(e) = fs::write(sandbox_root.join("edit.txt"), b"alpha\nbeta\n") {
+            panic!("failed to seed sandbox file: {e}");
+        }
+
+        let tool = EditorEditTool::new_for_tests(sandbox_root.clone());
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let mut memory = WorkingMemory::new();
+        memory.workspace.apply_delta(WorkspaceDelta::PublishEditorBuffer {
+            path: hstack_core::virtual_fs::VirtualPath::from_absolute("/edit.txt")
+                .unwrap_or_else(|e| panic!("virtual path parse failed: {e}")),
+            conflict_token: None,
+            content: "alpha\nbeta\n".to_string(),
+        });
+
+        let action = match tool.execute(serde_json::json!({
+            "operation": "replace",
+            "row_start": 1,
+            "row_end": 2,
+            "replacement_text": "beta-2\nbeta-3"
+        }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("editor_edit failed: {e}"),
+        };
+        apply_action_for_test(&mut memory, action).await;
+
+        assert_eq!(memory.workspace.dock.focused_app, AppId::Editor);
+        let buffer = memory.workspace.editor.buffer.as_ref().unwrap_or_else(|| panic!("expected editor buffer"));
+        assert_eq!(buffer.path.as_str(), "/edit.txt");
+        assert!(buffer.lines.iter().any(|line| line == "beta-2"));
+        assert!(buffer.lines.iter().any(|line| line == "beta-3"));
+
+        let content = match fs::read_to_string(sandbox_root.join("edit.txt")) {
+            Ok(content) => content,
+            Err(e) => panic!("failed to read edited file: {e}"),
+        };
+        assert_eq!(content, "alpha\nbeta-2\nbeta-3\n");
+
+        let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[tokio::test]
+    async fn test_editor_edit_tool_accepts_explicit_virtual_path() {
+        let sandbox_root = temp_sandbox_root();
+        if let Err(e) = fs::write(sandbox_root.join("notes.txt"), b"alpha\n") {
+            panic!("failed to seed sandbox file: {e}");
+        }
+
+        let tool = EditorEditTool::new_for_tests(sandbox_root.clone());
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let mut memory = WorkingMemory::new();
+
+        let action = match tool.execute(serde_json::json!({
+            "operation": "append",
+            "path": "/notes.txt",
+            "replacement_text": "beta"
+        }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("editor_edit append failed: {e}"),
+        };
+        apply_action_for_test(&mut memory, action).await;
+
+        let content = match fs::read_to_string(sandbox_root.join("notes.txt")) {
+            Ok(content) => content,
+            Err(e) => panic!("failed to read edited file: {e}"),
+        };
+        assert_eq!(content, "alpha\nbeta\n");
+        assert_eq!(memory.workspace.editor.language_id, None);
+
+        let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[tokio::test]
+    async fn test_editor_edit_tool_rejects_missing_path_without_open_buffer() {
+        let sandbox_root = temp_sandbox_root();
+        let tool = EditorEditTool::new_for_tests(sandbox_root.clone());
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let memory = WorkingMemory::new();
+
+        let err = match tool.execute(serde_json::json!({
+            "operation": "insert",
+            "row_start": 0,
+            "replacement_text": "alpha"
+        }), &world, &memory).await {
+            Ok(_) => panic!("expected editor_edit to reject missing path"),
+            Err(e) => e,
+        };
+
+        match err {
+            Error::Provider(msg) => assert!(msg.contains("requires 'path' when no editor buffer is open")),
+            _ => panic!("unexpected error type from editor_edit"),
+        }
+
+        let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[tokio::test]
+    async fn test_editor_edit_rejects_legacy_new_lines_payload() {
+        let sandbox_root = temp_sandbox_root();
+        if let Err(e) = fs::write(sandbox_root.join("edit.txt"), b"alpha\nbeta\n") {
+            panic!("failed to seed sandbox file: {e}");
+        }
+
+        let tool = EditorEditTool::new_for_tests(sandbox_root.clone());
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let mut memory = WorkingMemory::new();
+        memory.workspace.apply_delta(WorkspaceDelta::PublishEditorBuffer {
+            path: hstack_core::virtual_fs::VirtualPath::from_absolute("/edit.txt")
+                .unwrap_or_else(|e| panic!("virtual path parse failed: {e}")),
+            conflict_token: None,
+            content: "alpha\nbeta\n".to_string(),
+        });
+
+        let err = match tool.execute(serde_json::json!({
+            "operation": "replace",
+            "row_start": 1,
+            "row_end": 2,
+            "new_lines": ["beta-2"]
+        }), &world, &memory).await {
+            Ok(_) => panic!("expected editor_edit to reject legacy new_lines payload"),
+            Err(e) => e,
+        };
+
+        match err {
+            Error::Provider(msg) => assert!(msg.contains("editor_edit requires string 'replacement_text'")),
+            _ => panic!("unexpected error type from editor_edit"),
+        }
+
+        let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[tokio::test]
+    async fn test_editor_app_infers_language_and_accepts_analysis_updates() {
+        let mut workspace = crate::workspace::WorkspaceState::default();
+        let path = hstack_core::virtual_fs::VirtualPath::from_absolute("/src/lib.rs")
+            .unwrap_or_else(|e| panic!("virtual path parse failed: {e}"));
+        workspace.apply_delta(WorkspaceDelta::PublishEditorBuffer {
+            path: path.clone(),
+            conflict_token: None,
+            content: "pub fn demo() {}\n".to_string(),
+        });
+        workspace.apply_delta(WorkspaceDelta::PublishEditorAnalysis {
+            path,
+            language_id: Some("rust".to_string()),
+            diagnostics: vec![crate::workspace::EditorDiagnostic {
+                path: hstack_core::virtual_fs::VirtualPath::from_absolute("/src/lib.rs")
+                    .unwrap_or_else(|e| panic!("virtual path parse failed: {e}")),
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 3,
+                severity: crate::workspace::EditorDiagnosticSeverity::Warning,
+                source: Some("rust-analyzer".to_string()),
+                message: "demo diagnostic".to_string(),
+            }],
+        });
+
+        assert_eq!(workspace.editor.language_id.as_deref(), Some("rust"));
+        assert_eq!(workspace.editor.diagnostics.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_execution_request_runs_and_collects_light_compute() {
+        let tool = ExecutionRequestTool;
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let mut memory = WorkingMemory::new();
+
+        let run_action = match tool.execute(serde_json::json!({
+            "operation": "run_tool",
+            "tool_id": "light_compute",
+            "argv": ["return { answer: 7 * 6 };", "{}"],
+            "cwd": "/",
+            "network_policy": "deny",
+            "filesystem_capability_profile": "project_sandbox"
+        }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("execution_request run_tool failed: {e}"),
+        };
+        apply_action_for_test(&mut memory, run_action).await;
+
+        let handle = memory
+            .workspace
+            .jobs
+            .history
+            .last()
+            .and_then(|record| record.detail.get("status"))
+            .and_then(|status| status.get("handle"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| panic!("expected execution handle in job history"));
+
+        let poll_action = match tool.execute(serde_json::json!({
+            "operation": "poll_execution",
+            "handle": handle
+        }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("execution_request poll_execution failed: {e}"),
+        };
+        apply_action_for_test(&mut memory, poll_action).await;
+
+        let collect_action = match tool.execute(serde_json::json!({
+            "operation": "collect_output",
+            "handle": memory
+                .workspace
+                .jobs
+                .history
+                .last()
+                .and_then(|record| record.detail.get("status"))
+                .and_then(|status| status.get("handle"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("expected execution handle after poll"))
+        }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("execution_request collect_output failed: {e}"),
+        };
+        apply_action_for_test(&mut memory, collect_action).await;
+
+        let last_job = memory.workspace.jobs.history.last().unwrap_or_else(|| panic!("expected job history"));
+        assert!(last_job.summary.starts_with("collect "));
+        let stdout = last_job
+            .detail
+            .get("output")
+            .and_then(|output| output.get("stdout"))
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("expected collected stdout bytes"));
+        assert!(!stdout.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_agent_scenario_ide_file_workflow_is_fully_compliant() {
+        let sandbox_root = temp_sandbox_root();
+        if let Err(e) = fs::create_dir_all(sandbox_root.join("src")) {
+            panic!("failed to create scenario src dir: {e}");
+        }
+        if let Err(e) = fs::write(
+            sandbox_root.join("src/lib.rs"),
+            b"pub fn old_name() {}\n",
+        ) {
+            panic!("failed to seed scenario file: {e}");
+        }
+
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(MicrobashTool::new_for_tests(sandbox_root.clone())),
+            Box::new(EditorEditTool::new_for_tests(sandbox_root.clone())),
+            Box::new(InspectAppTool),
+            Box::new(IdentityTool),
+        ];
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let mut memory = WorkingMemory::new();
+
+        let _ = run_scripted_tool_step(
+            &tools,
+            "microbash",
+            serde_json::json!({ "command": "ls /src" }),
+            &world,
+            &mut memory,
+        )
+        .await;
+        let _ = run_scripted_tool_step(
+            &tools,
+            "microbash",
+            serde_json::json!({ "command": "cat /src/lib.rs" }),
+            &world,
+            &mut memory,
+        )
+        .await;
+        let _ = run_scripted_tool_step(
+            &tools,
+            "editor_edit",
+            serde_json::json!({
+                "operation": "replace",
+                "row_start": 0,
+                "row_end": 1,
+                "replacement_text": "pub fn new_name() {}"
+            }),
+            &world,
+            &mut memory,
+        )
+        .await;
+        let _ = run_scripted_tool_step(
+            &tools,
+            "microbash",
+            serde_json::json!({ "command": "grep new_name /src" }),
+            &world,
+            &mut memory,
+        )
+        .await;
+        let inspect_action = run_scripted_tool_step(
+            &tools,
+            "inspect_app",
+            serde_json::json!({ "app_id": "editor" }),
+            &world,
+            &mut memory,
+        )
+        .await;
+        let identity_action = run_scripted_tool_step(
+            &tools,
+            "identity",
+            serde_json::json!({ "answer": "Updated /src/lib.rs and verified new_name in the sandboxed IDE workflow." }),
+            &world,
+            &mut memory,
+        )
+        .await;
+
+        let inspect_payload = extract_inspect_payload(inspect_action, "inspect_app:editor");
+        let visible = inspect_payload
+            .get("visible")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("expected visible editor lines in inspect payload"));
+        assert!(visible.iter().any(|line| line.as_str() == Some("path: /src/lib.rs")));
+        assert!(visible.iter().any(|line| line.as_str() == Some("0 | pub fn new_name() {}")));
+
+        match identity_action {
+            AgentAction::Stop(answer) => {
+                assert_eq!(
+                    answer,
+                    "Updated /src/lib.rs and verified new_name in the sandboxed IDE workflow."
+                );
+            }
+            other => panic!("expected identity to stop the scenario, got {other:?}"),
+        }
+
+        let content = match fs::read_to_string(sandbox_root.join("src/lib.rs")) {
+            Ok(content) => content,
+            Err(e) => panic!("failed to read scenario file: {e}"),
+        };
+        assert_eq!(content, "pub fn new_name() {}\n");
+        assert_eq!(memory.workspace.editor.language_id.as_deref(), Some("rust"));
+        assert_eq!(memory.workspace.editor.buffer.as_ref().map(|buffer| buffer.path.as_str()), Some("/src/lib.rs"));
+        assert_eq!(memory.workspace.file_search.focused_query.as_deref(), Some("new_name"));
+        assert_eq!(memory.workspace.file_search.matches.len(), 1);
+        assert_eq!(memory.workspace.file_search.matches[0].path.as_str(), "/src/lib.rs");
+        assert!(memory.workspace.jobs.history.iter().any(|record| record.summary == "editor_edit /src/lib.rs"));
+        assert!(memory.technical_noise.iter().any(|entry| entry.get("microbash").is_some()));
+        assert!(memory.technical_noise.iter().any(|entry| entry.get("editor_edit").is_some()));
+        assert!(memory.messages.iter().any(|message| {
+            matches!(message.role, Role::Assistant)
+                && message.content.as_deref()
+                    == Some("Updated /src/lib.rs and verified new_name in the sandboxed IDE workflow.")
+        }));
+
+        let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[tokio::test]
+    async fn test_agent_scenario_execution_workflow_is_fully_compliant() {
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(ExecutionRequestTool),
+            Box::new(InspectAppTool),
+            Box::new(IdentityTool),
+        ];
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let mut memory = WorkingMemory::new();
+
+        let _ = run_scripted_tool_step(
+            &tools,
+            "execution_request",
+            serde_json::json!({
+                "operation": "run_tool",
+                "tool_id": "light_compute",
+                "argv": ["return { answer: 6 * 7, label: 'scenario' };", "{}"],
+                "cwd": "/",
+                "network_policy": "deny",
+                "filesystem_capability_profile": "project_sandbox"
+            }),
+            &world,
+            &mut memory,
+        )
+        .await;
+        let handle = extract_job_handle(&memory);
+
+        let _ = run_scripted_tool_step(
+            &tools,
+            "execution_request",
+            serde_json::json!({
+                "operation": "poll_execution",
+                "handle": handle
+            }),
+            &world,
+            &mut memory,
+        )
+        .await;
+        let handle = extract_job_handle(&memory);
+
+        let _ = run_scripted_tool_step(
+            &tools,
+            "execution_request",
+            serde_json::json!({
+                "operation": "collect_output",
+                "handle": handle
+            }),
+            &world,
+            &mut memory,
+        )
+        .await;
+        let inspect_action = run_scripted_tool_step(
+            &tools,
+            "inspect_app",
+            serde_json::json!({ "app_id": "jobs" }),
+            &world,
+            &mut memory,
+        )
+        .await;
+        let identity_action = run_scripted_tool_step(
+            &tools,
+            "identity",
+            serde_json::json!({ "answer": "Execution workflow completed and collected buffered output successfully." }),
+            &world,
+            &mut memory,
+        )
+        .await;
+
+        let inspect_payload = extract_inspect_payload(inspect_action, "inspect_app:jobs");
+        let visible = inspect_payload
+            .get("visible")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("expected visible jobs records in inspect payload"));
+        assert!(visible.iter().any(|line| {
+            line.as_str()
+                .map(|value| value.contains("execution light_compute"))
+                .unwrap_or(false)
+        }));
+        assert!(visible.iter().any(|line| {
+            line.as_str()
+                .map(|value| value.contains("collect "))
+                .unwrap_or(false)
+        }));
+
+        match identity_action {
+            AgentAction::Stop(answer) => {
+                assert_eq!(
+                    answer,
+                    "Execution workflow completed and collected buffered output successfully."
+                );
+            }
+            other => panic!("expected identity to stop the scenario, got {other:?}"),
+        }
+
+        assert!(memory.workspace.jobs.history.len() >= 3);
+        assert!(memory.workspace.jobs.history[0].summary.starts_with("execution light_compute"));
+        let last_job = memory.workspace.jobs.history.last().unwrap_or_else(|| panic!("expected last job record"));
+        assert!(last_job.summary.starts_with("collect "));
+        let stdout = last_job
+            .detail
+            .get("output")
+            .and_then(|output| output.get("stdout"))
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("expected collected stdout bytes"));
+        let stdout_bytes: Vec<u8> = stdout
+            .iter()
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|byte| u8::try_from(byte).ok())
+                    .unwrap_or_else(|| panic!("expected valid stdout byte"))
+            })
+            .collect();
+        let stdout_text = String::from_utf8(stdout_bytes)
+            .unwrap_or_else(|e| panic!("expected UTF-8 encoded stdout: {e}"));
+        assert!(stdout_text.contains("\"answer\":42"));
+        assert!(stdout_text.contains("\"label\":\"scenario\""));
+        assert!(memory.technical_noise.iter().any(|entry| entry.get("execution_request").is_some()));
+        assert!(memory.messages.iter().any(|message| {
+            matches!(message.role, Role::Assistant)
+                && message.content.as_deref()
+                    == Some("Execution workflow completed and collected buffered output successfully.")
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_agent_run_scenario_corrects_bad_edit_then_cats_final_file() {
+        let sandbox_root = temp_sandbox_root();
+        if let Err(e) = fs::create_dir_all(sandbox_root.join("src")) {
+            panic!("failed to create scenario src dir: {e}");
+        }
+        if let Err(e) = fs::write(
+            sandbox_root.join("src/lib.rs"),
+            b"pub fn stable_name() {}\n",
+        ) {
+            panic!("failed to seed scenario file: {e}");
+        }
+
+        let responses = vec![
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: Some(vec![crate::provider::ToolCall {
+                    id: "call_cat_initial".to_string(),
+                    r#type: "function".to_string(),
+                    function: crate::provider::ToolFunctionCall {
+                        name: "microbash".to_string(),
+                        arguments: r#"{"command":"cat /src/lib.rs"}"#.to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: Some(vec![crate::provider::ToolCall {
+                    id: "call_bad_edit".to_string(),
+                    r#type: "function".to_string(),
+                    function: crate::provider::ToolFunctionCall {
+                        name: "editor_edit".to_string(),
+                        arguments: r#"{"operation":"replace","row_start":0,"row_end":1,"replacement_text":"pub fn stable_name( {}"}"#.to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: Some(vec![crate::provider::ToolCall {
+                    id: "call_fix_edit".to_string(),
+                    r#type: "function".to_string(),
+                    function: crate::provider::ToolFunctionCall {
+                        name: "editor_edit".to_string(),
+                        arguments: r#"{"operation":"replace","row_start":0,"row_end":1,"replacement_text":"pub fn stable_name() {}"}"#.to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: Some(vec![crate::provider::ToolCall {
+                    id: "call_cat_final".to_string(),
+                    r#type: "function".to_string(),
+                    function: crate::provider::ToolFunctionCall {
+                        name: "microbash".to_string(),
+                        arguments: r#"{"command":"cat /src/lib.rs"}"#.to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: Some(vec![crate::provider::ToolCall {
+                    id: "call_identity_final".to_string(),
+                    r#type: "function".to_string(),
+                    function: crate::provider::ToolFunctionCall {
+                        name: "identity".to_string(),
+                        arguments: r#"{"answer":"I corrected the broken edit and verified the final file contents with cat."}"#.to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+        ];
+
+        let agent = Agent {
+            provider: Box::new(MockProvider {
+                responses: Arc::new(Mutex::new(responses)),
+            }),
+            manager: Box::new(SimpleContextManager),
+            control: Box::new(AllowAllControl),
+            tools: vec![
+                Box::new(IdentityTool),
+                Box::new(MicrobashTool::new_for_tests(sandbox_root.clone())),
+                Box::new(EditorEditTool::new_for_tests(sandbox_root.clone())),
+            ],
+            base_prompt: "You are a helpful assistant.".to_string(),
+        };
+
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let mut memory = WorkingMemory::new();
+
+        let (answer, deltas) = match agent.run(&world, &mut memory).await {
+            Ok(result) => result,
+            Err(e) => panic!("agent run failed: {e}"),
+        };
+
+        assert_eq!(
+            answer,
+            "I corrected the broken edit and verified the final file contents with cat."
+        );
+        assert!(deltas.is_empty());
+
+        let final_content = match fs::read_to_string(sandbox_root.join("src/lib.rs")) {
+            Ok(content) => content,
+            Err(e) => panic!("failed to read final scenario file: {e}"),
+        };
+        assert_eq!(final_content, "pub fn stable_name() {}\n");
+
+        let buffer = memory
+            .workspace
+            .editor
+            .buffer
+            .as_ref()
+            .unwrap_or_else(|| panic!("expected editor buffer after final cat"));
+        assert_eq!(buffer.path.as_str(), "/src/lib.rs");
+        assert!(buffer.lines.iter().any(|line| line == "pub fn stable_name() {}"));
+        assert_eq!(memory.workspace.editor.language_id.as_deref(), Some("rust"));
+
+        let editor_edit_jobs = memory
+            .workspace
+            .jobs
+            .history
+            .iter()
+            .filter(|record| record.summary == "editor_edit /src/lib.rs")
+            .count();
+        assert_eq!(editor_edit_jobs, 2);
+
+        let final_cat_jobs = memory
+            .workspace
+            .jobs
+            .history
+            .iter()
+            .filter(|record| record.summary == "microbash cat /src/lib.rs")
+            .count();
+        assert_eq!(final_cat_jobs, 2);
+
+        let microbash_events = memory
+            .technical_noise
+            .iter()
+            .filter(|entry| entry.get("microbash").is_some())
+            .count();
+        assert_eq!(microbash_events, 2);
+
+        let editor_edit_events = memory
+            .technical_noise
+            .iter()
+            .filter(|entry| entry.get("editor_edit").is_some())
+            .count();
+        assert_eq!(editor_edit_events, 2);
+
+        assert!(memory.messages.iter().any(|message| {
+            matches!(message.role, Role::Assistant)
+                && message.content.as_deref()
+                    == Some("I corrected the broken edit and verified the final file contents with cat.")
+        }));
+
+    }
+
+    #[tokio::test]
+    async fn test_visible_editor_and_scratchpad_lines_are_row_numbered_for_targeted_edits() {
+        let mut workspace = crate::workspace::WorkspaceState::default();
+        workspace.scratchpad.document_lines = vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+        ];
+        workspace.apply_delta(WorkspaceDelta::PublishEditorBuffer {
+            path: hstack_core::virtual_fs::VirtualPath::from_absolute("/src/lib.rs")
+                .unwrap_or_else(|e| panic!("virtual path parse failed: {e}")),
+            conflict_token: None,
+            content: "line one\nline two\n".to_string(),
+        });
+
+        assert_eq!(workspace.visible_scratchpad_lines()[0], "0 | alpha");
+        assert_eq!(workspace.visible_scratchpad_lines()[1], "1 | beta");
+        let editor_visible = workspace.visible_editor_lines();
+        assert!(editor_visible.iter().any(|line| line == "0 | line one"));
+        assert!(editor_visible.iter().any(|line| line == "1 | line two"));
     }
 
     #[tokio::test]

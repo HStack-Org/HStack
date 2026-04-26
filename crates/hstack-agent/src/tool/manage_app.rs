@@ -24,7 +24,7 @@ impl Tool for ManageAppTool {
             "type": "object",
             "properties": {
                 "action": { "type": "string", "enum": ["open", "close", "focus", "pin", "unpin", "scroll_up", "scroll_down"] },
-                "app_id": { "type": "string", "enum": ["scratchpad", "websearch", "stack-search", "compute"] },
+                "app_id": { "type": "string", "enum": ["scratchpad", "websearch", "stack-search", "compute", "file-tree", "editor", "file-search", "jobs"] },
                 "lines": { "type": "integer", "minimum": 1, "description": "Optional scroll amount for scroll actions." }
             },
             "required": ["action", "app_id"]
@@ -66,6 +66,10 @@ fn parse_app_id(value: Option<&Value>) -> Result<AppId, Error> {
         Some("websearch") => Ok(AppId::WebSearch),
         Some("stack-search") => Ok(AppId::StackSearch),
         Some("compute") => Ok(AppId::Compute),
+        Some("file-tree") => Ok(AppId::FileTree),
+        Some("editor") => Ok(AppId::Editor),
+        Some("file-search") => Ok(AppId::FileSearch),
+        Some("jobs") => Ok(AppId::Jobs),
         _ => Err(Error::Provider("manage_app requires a valid 'app_id'".to_string())),
     }
 }

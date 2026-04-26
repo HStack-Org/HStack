@@ -189,6 +189,40 @@ The virtual path language does not support:
 5. shell glob expansion in path parsing
 6. environment-variable expansion
 
+### Formal Virtual Path Grammar
+
+The virtual path grammar should be treated as a pure path grammar, not as a shell grammar.
+
+One acceptable equivalent grammar is:
+
+```text
+virtual-path     := absolute-path | relative-path
+absolute-path    := "/" { segment-seq }
+relative-path    := segment { "/" segment }
+segment-seq      := segment { "/" segment }
+segment          := "." | ".." | name
+name             := 1*name-char
+name-char        := any Unicode scalar value except "/" and NUL
+```
+
+Additional semantic restrictions apply after parsing:
+
+1. empty path segments are ignored only as a normalization convenience and must not carry meaning
+2. NUL is always forbidden
+3. host path prefixes such as drive letters are forbidden
+4. path interpretation is Unicode-preserving and must not depend on host shell locale behavior
+
+### Virtual Working Directory
+
+Any relative path must be resolved against an explicit canonical virtual working directory.
+
+The following properties are required:
+
+1. the virtual working directory must always itself be a canonical virtual path
+2. the default virtual working directory for a new filesystem session should be `/`
+3. execution requests may override the current working directory only with another canonical virtual path
+4. no backend may implicitly substitute a host current working directory
+
 ### Canonicalization Rules
 
 Let:
@@ -215,6 +249,19 @@ Examples:
 - `canon_v(/src/app, ../README.md) = /src/README.md`
 - `canon_v(/, ../../etc/passwd)` must reject with `PathEscapeAboveRoot`
 
+### Path Validity And Rejection
+
+Path canonicalization must reject at minimum the following classes of input:
+
+1. any path containing NUL
+2. any path that attempts to traverse above `/`
+3. any path that requires backend-specific reinterpretation to be meaningful
+4. any path that is not valid UTF-8 if the implementation stores paths as UTF-8 strings
+5. any path with host-specific root syntax such as drive letters or UNC prefixes
+
+The implementation may additionally reject path segments that cannot round-trip across all supported
+backends. If it does so, that rejection must be explicit and deterministic.
+
 ### Required Invariant
 
 Backends must never receive unresolved user path strings.
@@ -232,6 +279,20 @@ canonicalize\_host(base / user\_input)
 $$
 
 because it allows backend-specific semantics to influence safety.
+
+### Backend-Neutral Naming Rule
+
+Because the design must support both local-root and bucket-backed backends, the public contract
+should prefer a conservative backend-neutral naming rule.
+
+At minimum, the contract should not require support for:
+
+1. names differing only by host case-folding behavior
+2. names depending on host alternate separator semantics
+3. names depending on trailing-dot or trailing-space preservation on specific filesystems
+
+If the implementation cannot preserve a name safely and consistently across the supported backend
+set, it must reject that name rather than silently rewrite it.
 
 ## Filesystem Object Model
 
@@ -271,6 +332,105 @@ The exact API names may vary, but the semantic set must include only operations 
 8. `delete_path(path, recursive)`
 9. `search_text(scope, query, limit)`
 
+### Operation Result Model
+
+Filesystem operations should return typed results rather than free-form text.
+
+At minimum, the model should include the equivalent of:
+
+1. `StatResult`
+2. `DirectoryEntry`
+3. `ReadResult`
+4. `WriteResult`
+5. `MoveResult`
+6. `DeleteResult`
+7. `SearchMatch`
+8. `ConflictToken`
+
+The exact type names may vary, but the semantic content should be explicit.
+
+### Operation Semantics
+
+#### `list_dir(path)`
+
+Required semantics:
+
+1. `path` must resolve to a canonical virtual directory path
+2. the result must contain only direct children, not recursive descendants
+3. entries must identify at least name, object kind, and conflict token if supported
+4. forbidden object kinds must cause failure, not silent omission, unless the implementation
+   explicitly documents a different safe policy
+
+#### `stat(path)`
+
+Required semantics:
+
+1. must identify whether the path refers to a regular file or directory
+2. must include size for files where meaningful
+3. must include a stable conflict token or version identifier where the backend supports it
+4. must fail explicitly if the object kind is forbidden or unsupported
+
+#### `read_file(path, offset, limit)`
+
+Required semantics:
+
+1. `path` must resolve to a canonical virtual file path
+2. reads are byte-oriented or text-oriented by explicit contract; the implementation must not
+   silently switch between them
+3. `offset` and `limit` must be validated against configured maxima
+4. the operation must fail explicitly on directories or forbidden object kinds
+
+#### `write_file(path, content, mode)`
+
+Required semantics:
+
+1. writes must target a canonical virtual file path
+2. the write mode must be explicit, such as `create_only`, `truncate`, or `replace_if_token_matches`
+3. the operation must not mutate execution or privilege metadata
+4. if the write is denied by ambient activation policy, the failure must be explicit
+
+#### `patch_file(path, patch)`
+
+Required semantics:
+
+1. patching must be deterministic and structurally validated before application
+2. patching must fail explicitly on stale conflict tokens when conflict tokens are in use
+3. patching must not silently fall back to overwrite-whole-file behavior
+
+#### `create_dir(path, recursive)`
+
+Required semantics:
+
+1. the target must resolve to a canonical virtual path
+2. recursive creation must create only ordinary directories
+3. creation must fail if any intermediate object is a forbidden object kind
+
+#### `move_path(from, to, overwrite)`
+
+Required semantics:
+
+1. both endpoints must be canonical virtual paths
+2. moves must be policy-checked at both source and destination
+3. moving onto a forbidden path class must fail explicitly
+4. overwrites must require an explicit overwrite mode
+
+#### `delete_path(path, recursive)`
+
+Required semantics:
+
+1. deletion must be explicit about recursive vs non-recursive behavior
+2. recursive deletion must never expand outside the canonical target subtree
+3. deletion must fail explicitly on forbidden object kinds or policy-denied targets
+
+#### `search_text(scope, query, limit)`
+
+Required semantics:
+
+1. search scope must be expressed over canonical virtual paths or explicit scope objects
+2. search must be bounded by explicit result and byte budgets
+3. search must not implicitly read the entire backend without policy approval
+4. matches should identify path, location, and matched text excerpt
+
 The instruction surface must not include:
 
 1. `chmod`
@@ -300,6 +460,13 @@ At minimum, a backend must define behavior for:
 8. conflict handling
 9. capability denial
 
+It should also define:
+
+1. text encoding expectations
+2. conflict token generation and comparison rules
+3. ordering guarantees for directory listings and search results
+4. atomicity guarantees for write-like operations
+
 ### Required Backend Properties
 
 Every backend must be:
@@ -309,6 +476,51 @@ Every backend must be:
 3. explicit about unsupported operations
 4. incapable of silent path reinterpretation
 5. incapable of link traversal
+6. explicit about case-sensitivity behavior
+7. explicit about text encoding and newline preservation behavior
+8. explicit about atomic vs best-effort write semantics
+
+### Conflict Semantics
+
+Backends should support optimistic concurrency through conflict tokens where possible.
+
+At minimum, the semantic contract should allow:
+
+1. read current conflict token
+2. write only if token matches
+3. fail explicitly with a conflict error if the token does not match
+
+If a backend cannot provide strong conflict tokens, it must either:
+
+1. document that limitation explicitly, or
+2. emulate conflict detection conservatively
+
+It must not pretend to provide conflict safety if it does not.
+
+### Atomicity Requirements
+
+For the public local backend:
+
+1. `write_file` and `patch_file` should be atomic at the single-path level where practical
+2. partial writes must not be reported as success
+3. crash-consistency guarantees should be documented explicitly
+
+For bucket-backed backends:
+
+1. put/replace semantics may be backend-native
+2. object versioning or ETag-style semantics should be surfaced as conflict tokens where possible
+
+### Search Semantics Across Backends
+
+Backends may implement search differently internally, but the public result contract must remain
+stable.
+
+At minimum:
+
+1. search must operate over canonical virtual paths
+2. result ordering should be deterministic
+3. result truncation must be explicit
+4. binary or non-text files may be skipped only by explicit policy
 
 ### Local Sandboxed Root Backend
 
@@ -392,6 +604,11 @@ it in a dedicated sandbox, it is not forbidden by ambient activation policy.
 The policy must deny writes to the following path classes and artifact classes.
 
 This list is normative for the public local backend.
+
+The list below is intentionally extensive for host auto-activation surfaces. It is not a list of
+all "dangerous" files. It is a list of files and path classes that the public local backend must
+treat as forbidden because they may be activated by host conventions rather than by explicit user-
+triggered sandbox execution.
 
 ### Category A: Host Profile Roots And Shell Initialization Locations
 
@@ -552,7 +769,7 @@ Allowed:
 
 Forbidden:
 
-1. all Category A through H paths and artifact classes
+1. all Category A through G paths and artifact classes
 2. any execution request
 
 ### Profile 2: `project_sandbox`
@@ -573,11 +790,48 @@ Still forbidden:
 2. all Category G operations
 3. direct host execution
 
+### Profile Escalation Rule
+
+No operation may implicitly escalate from `safe_data_sandbox` to `project_sandbox`.
+
+If an instruction requires `project_sandbox`, that requirement must be explicit at planning time.
+
 ## Microbash Model
 
 Microbash is a constrained instruction language with a user-facing textual syntax.
 
 It is not a true shell.
+
+The purpose of microbash is ergonomic familiarity, not shell compatibility.
+
+### Microbash Design Goal
+
+Microbash should feel close enough to ordinary Unix-style command lines that users can express
+common file and search workflows concisely, but every construct must lower to the constrained
+instruction algebra defined by this specification.
+
+Similarity of surface syntax must never override the safety model.
+
+### Microbash Command Classes
+
+The public baseline microbash language should support only command classes that can be lowered to
+safe typed instructions.
+
+Examples of acceptable command classes include:
+
+1. list directory contents
+2. print or read a file window
+3. write or replace a file
+4. move or delete a path
+5. search text within a scoped subtree
+6. invoke a later allowlisted sandbox tool by explicit name
+
+Examples of unacceptable command classes include:
+
+1. raw shell execution
+2. runtime PATH discovery
+3. shell sourcing or profile mutation
+4. arbitrary process piping with host programs
 
 ### Required Pipeline
 
@@ -588,10 +842,29 @@ The required execution model is:
 3. validate the plan against filesystem and execution policy
 4. execute the plan against the selected backend
 
+The parser and lowering logic must be pure and testable without invoking a backend.
+
 The following pipeline is forbidden:
 
 1. render a shell string
 2. invoke `/bin/bash`, `/bin/sh`, `cmd.exe`, PowerShell, or equivalent
+
+### Microbash Minimal Grammar Shape
+
+The exact grammar may evolve, but one acceptable family of forms is:
+
+```text
+command-line   := command { "|" command }
+command        := word { word | option | path-literal | string-literal }
+option         := "-" option-name [ option-value ]
+word           := 1*non-space-character
+path-literal   := absolute-virtual-path | relative-virtual-path
+```
+
+This does not imply shell semantics.
+
+Pipelines, if supported at all, must compose only over typed instruction outputs, not host shell
+stdout pipes.
 
 ### Microbash Must Not Support Shell Features With Host Semantics
 
@@ -607,6 +880,8 @@ The public baseline microbash language must not support:
 8. PATH lookup against the host environment
 9. sourcing shell scripts
 10. shell functions or aliases
+11. implicit current-user home resolution
+12. implicit host profile loading
 
 ### Microbash Lowering Target
 
@@ -615,11 +890,27 @@ Microbash may lower only into:
 1. filesystem instructions from the filesystem instruction algebra
 2. execution instructions from a separate constrained execution algebra
 
+If a microbash command cannot be lowered to a valid typed plan, it must fail explicitly.
+
+### Microbash Error Classes
+
+At minimum, microbash should distinguish:
+
+1. parse error
+2. unsupported construct error
+3. capability denial error
+4. path policy error
+5. backend execution error
+6. conflict error
+
 ## Execution Model
 
 Execution is not part of the filesystem abstraction.
 
 Execution must be a separate capability surface with explicit policy.
+
+Execution is optional in the public implementation. Filesystem support does not imply execution
+support.
 
 At minimum, an execution request must include:
 
@@ -631,10 +922,35 @@ At minimum, an execution request must include:
 6. output size limit
 7. filesystem capability profile used during execution
 
+It should also include:
+
+1. explicit stdin policy
+2. explicit network policy
+3. explicit output streaming policy
+
 The public baseline implementation must not support arbitrary host executable lookup.
 
 If execution exists publicly, it should target an explicit constrained runtime such as a later
 sandbox executor rather than the host shell.
+
+### Execution Instruction Algebra
+
+If execution exists, it should also be a closed typed instruction set.
+
+At minimum, the semantic model should distinguish:
+
+1. `run_tool(tool_id, argv, cwd, env_allowlist, limits)`
+2. `poll_execution(handle)`
+3. `cancel_execution(handle)`
+4. `collect_output(handle)`
+
+The execution algebra must not include a generic "run this host shell string" operation.
+
+### Execution And Filesystem Separation
+
+The existence of a writable file does not grant any right to execute that file.
+
+Execution authorization must be checked separately from filesystem write authorization.
 
 ## Workspace Integration
 
@@ -646,6 +962,35 @@ The intended userland additions are:
 2. editor app
 3. filesystem search app
 4. execution/job app
+
+### Editor Mutation Rule
+
+The editor app may expose direct editing affordances to the agent, but those affordances must not
+bypass the filesystem abstraction.
+
+Required properties:
+
+1. any editor-originated mutation must lower to typed filesystem instructions over canonical virtual paths
+2. editor edits must not carry host-native file paths or direct host filesystem handles
+3. if no explicit virtual path is provided, the edit surface may target the currently open editor buffer only
+4. editor-originated writes should use conflict tokens when available so stale buffers fail explicitly rather than silently overwriting newer state
+
+### Future IDE Extensibility
+
+The editor surface should be treated as the seed of a broader IDE model rather than as a one-off
+text viewer.
+
+The public model should remain compatible with later additions such as:
+
+1. language identifiers
+2. diagnostics
+3. symbol outlines
+4. hover or definition metadata
+5. code actions
+6. LSP-backed analysis results
+
+These later additions must remain projection surfaces over bounded workspace state. They must not
+change the core rule that text mutation flows through the secured virtual filesystem contract.
 
 These apps must follow the same lifecycle, viewport, and dock rules defined in
 [agent-workspace-viewport-spec.md](agent-workspace-viewport-spec.md).
@@ -666,8 +1011,32 @@ Examples include:
 6. capability denials
 7. size-limit violations
 8. policy-profile mismatches
+9. stale conflict tokens
+10. backend capability mismatch
 
 The runtime must not silently coerce a forbidden operation into a weaker allowed operation.
+
+## Error Taxonomy
+
+An implementation should expose a typed error taxonomy rather than stringly typed failures.
+
+At minimum, the taxonomy should distinguish:
+
+1. `PathEscapeAboveRoot`
+2. `InvalidVirtualPath`
+3. `ForbiddenObjectKind`
+4. `ForbiddenPathClass`
+5. `ForbiddenArtifactClass`
+6. `PolicyDenied`
+7. `Conflict`
+8. `UnsupportedOperation`
+9. `BackendInvariantViolation`
+10. `ParseError`
+11. `LoweringError`
+12. `ExecutionDenied`
+13. `ExecutionFailed`
+
+The exact type names may vary, but these semantic categories should remain distinct.
 
 ## Validation Requirements
 
@@ -681,6 +1050,9 @@ Any implementation of this specification must include tests covering at least:
 6. allowance of ordinary inert project files in `project_sandbox`
 7. proof that microbash is not lowered to a host shell
 8. proof that host absolute paths are never accepted as canonical virtual paths
+9. conflict token behavior
+10. deterministic directory listing and search ordering where promised
+11. backend-neutral naming rejection where required
 
 ## Public/Private Boundary
 
@@ -704,14 +1076,27 @@ The intended implementation order is:
 
 1. define the virtual path algebra and canonicalization rules in pure code
 2. define the filesystem instruction algebra and policy model
-3. implement the local sandboxed root backend with Category A through H restrictions
+3. implement the local sandboxed root backend with Category A through G restrictions
 4. integrate filesystem views into the workspace app model
 5. add microbash parsing and lowering to the instruction algebra
 6. add optional constrained execution as a separate capability
-7. extend with private remote or object-storage backends where needed
+7. extend with private remote or bucket-backed object-storage backends where needed
 
 This order is mandatory because it keeps the safety boundary explicit before convenience surfaces
 such as microbash are introduced.
+
+## Conformance Requirement
+
+Any implementation that claims conformance with this document should identify:
+
+1. which capability profile it implements
+2. which backend class it implements
+3. which conflict semantics it provides
+4. which execution semantics it provides, if any
+5. which parts of the validation matrix are covered by tests
+
+An implementation that omits these declarations should be treated as incomplete rather than as
+implicitly conformant.
 
 ## Testing Requirement
 

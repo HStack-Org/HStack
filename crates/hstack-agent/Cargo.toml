@@ -20,7 +20,7 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 futures = "0.3"
-redis = { version = "0.25", features = ["tokio-comp", "aio"] }
+redis = { version = "1.2.0", features = ["tokio-comp", "aio"] }
 rand = "0.8"
 monty = { git = "https://github.com/pydantic/monty" }
 
