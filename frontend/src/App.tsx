@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useMemo } from "react";
-import { SyncProvider, TicketModel } from "./SyncEngine";
+import { SyncProvider, TicketModel, type AgentProgressState } from "./SyncEngine";
 import { projectTickets } from "./ticketPresentation";
 import { useSync } from "./useSync";
-import { Send, ChevronDown, Plus, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ChevronUp, ExternalLink, Mic, Square } from "lucide-react";
+import { Send, ChevronDown, ChevronUp, Plus, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ExternalLink, Mic, Square, MessageSquareText, FolderOpen, FileText, Search, TerminalSquare, type LucideIcon } from "lucide-react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -30,7 +30,7 @@ import {
   groupTickets,
   resolveStructuredLocation,
 } from "./ticketPresentation";
-import { canUseDesktopWindowControls, minimizeDesktopWindow, startDesktopWindowDrag } from "./platform";
+import { canUseDesktopWindowControls, minimizeDesktopWindow, openAgentWorkspaceWindow, startDesktopWindowDrag } from "./platform";
 import { buildApiUrl, resolveRemoteSyncConfig, type SyncSessionInfo, type UserSettingsShape } from "./syncConfig";
 import type { UserSettings, VoiceCapabilityResponse, VoiceSecretStatus } from "./components/settings/types";
 
@@ -105,11 +105,74 @@ const COMPOSER_PROCESSING_THEME_COOL = {
   c4: [10, 11, 14] as [number, number, number],
 };
 
-interface ChatMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
-  content?: string;
-  name?: string;
-}
+type HistoryItem =
+  | { kind: 'user_message'; id: string; content: string }
+  | { kind: 'assistant_response'; id: string; content: string }
+  | { kind: 'tool_call'; id: string; name: string; arguments: string }
+  | { kind: 'tool_result'; id: string; name: string; content: string }
+  | { kind: 'reasoning'; id: string; phase: string; iteration: number };
+
+const TOOL_VISUALS: Record<string, { label: string; icon: LucideIcon }> = {
+  create_ticket: { label: 'Create ticket', icon: Plus },
+  edit_ticket: { label: 'Edit ticket', icon: FileText },
+  delete_ticket: { label: 'Delete ticket', icon: FileText },
+  delete_all_tickets: { label: 'Delete tickets', icon: FileText },
+  search_stack: { label: 'Search stack', icon: Search },
+  follow_up: { label: 'Ask follow up', icon: ChevronRight },
+  microbash: { label: 'Run microbash', icon: TerminalSquare },
+  filesystem_patch: { label: 'Patch file', icon: FileText },
+  editor_edit: { label: 'Edit buffer', icon: FileText },
+  manage_app: { label: 'Manage app', icon: FolderOpen },
+  inspect_app: { label: 'Inspect app', icon: Search },
+  scratchpad_search: { label: 'Search scratchpad', icon: Search },
+  scratchpad_edit: { label: 'Edit scratchpad', icon: FileText },
+  execution_request: { label: 'Run execution', icon: TerminalSquare },
+};
+
+const formatToolName = (toolName: string) => TOOL_VISUALS[toolName]?.label ?? toolName.replace(/_/g, ' ');
+
+const getToolIcon = (toolName: string): LucideIcon => TOOL_VISUALS[toolName]?.icon ?? TerminalSquare;
+
+const formatArgumentValue = (value: unknown): string => {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (value === null || value === undefined) return 'null';
+  if (Array.isArray(value)) return value.map((entry) => formatArgumentValue(entry)).join(', ');
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+};
+
+const parseToolArguments = (rawArguments: string): Array<{ key: string; value: string }> => {
+  try {
+    const parsed = JSON.parse(rawArguments) as unknown;
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return [{ key: 'value', value: formatArgumentValue(parsed) }];
+    }
+
+    return Object.entries(parsed).map(([key, value]) => ({
+      key,
+      value: formatArgumentValue(value),
+    }));
+  } catch {
+    return [{ key: 'payload', value: rawArguments }];
+  }
+};
+
+const summarizeToolResult = (toolName: string, content: string) => {
+  const normalized = content.trim();
+  if (normalized === `tool ${toolName} executed successfully`) {
+    return 'Completed successfully';
+  }
+  if (normalized === `tool ${toolName} failed: invalid arguments`) {
+    return 'Failed due to invalid arguments';
+  }
+  return normalized;
+};
 
 interface VoiceEventPayload {
   type: 'started' | 'ready' | 'partial' | 'done' | 'error' | 'stopped';
@@ -693,7 +756,8 @@ const VOICE_SEND_ARM_DELAY_MS = 700;
 function App() {
     const { 
       tickets: baseTickets, syncNow, isConnected, hasRemoteSession, connectionPhase,
-      proposedActions, acceptProposals, rejectProposals 
+      proposedActions, acceptProposals, rejectProposals, agentSession, agentProgress,
+      agentFilesystemMount, pickAgentFilesystemMount
     } = useSync();
     const { t } = useI18n();
 
@@ -740,11 +804,9 @@ function App() {
       }, []);
     const [inputValue, setInputValue] = useState("");
     const [isProcessing, setIsProcessing] = useState(false);
-    const [, setAgentProgress] = useState<any>(null);
   const placeholder = t('placeholderManageStack');
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [integrations] = useState<string[]>([]);
-    const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
     const [isHistoryExpanded, setIsHistoryExpanded] = useState(false);
     const [interactionState, setInteractionState] = useState<InteractionState>('IDLE');
     const [showSetup, setShowSetup] = useState(false);
@@ -760,6 +822,63 @@ function App() {
     const projectedTickets = useMemo(() => {
       return projectTickets(baseTickets, proposedActions);
     }, [baseTickets, proposedActions]);
+
+    const runtimeMessages = useMemo(() => {
+      return agentProgress?.session.messages ?? agentSession?.messages ?? [];
+    }, [agentProgress, agentSession]);
+
+    const historyItems = useMemo<HistoryItem[]>(() => {
+      const items: HistoryItem[] = [];
+
+      runtimeMessages.forEach((message, index) => {
+        const itemBaseId = `${message.role}-${index}`;
+        if (message.role === 'user' && message.content?.trim()) {
+          items.push({ kind: 'user_message', id: itemBaseId, content: message.content.trim() });
+        }
+
+        if (message.role === 'assistant' && message.tool_calls?.length) {
+          message.tool_calls.forEach((toolCall, toolIndex) => {
+            if (toolCall.function.name === 'identity') {
+              return;
+            }
+            items.push({
+              kind: 'tool_call',
+              id: `${itemBaseId}-tool-${toolIndex}`,
+              name: toolCall.function.name,
+              arguments: toolCall.function.arguments,
+            });
+          });
+        }
+
+        if (message.role === 'assistant' && !message.tool_calls?.length && message.content?.trim()) {
+          items.push({ kind: 'assistant_response', id: itemBaseId, content: message.content.trim() });
+        }
+
+        if (message.role === 'tool') {
+          if (message.name === 'identity') {
+            return;
+          }
+          items.push({
+            kind: 'tool_result',
+            id: itemBaseId,
+            name: message.name ?? 'tool',
+            content: summarizeToolResult(message.name ?? 'tool', message.content?.trim() || 'completed'),
+          });
+        }
+      });
+
+      if (isProcessing) {
+        const progress: AgentProgressState | null = agentProgress;
+        items.push({
+          kind: 'reasoning',
+          id: `reasoning-${progress?.iteration ?? 0}-${progress?.phase ?? 'processing'}`,
+          phase: progress?.phase ?? 'processing',
+          iteration: progress?.iteration ?? 0,
+        });
+      }
+
+      return items;
+    }, [agentProgress, isProcessing, runtimeMessages]);
 
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const drawerRef = useRef<HTMLDivElement>(null);
@@ -997,7 +1116,11 @@ function App() {
         void refreshVoiceAvailability();
       }
     }, [isSettingsOpen]);
-    useEffect(() => { if (drawerRef.current && isHistoryExpanded) { drawerRef.current.scrollTop = drawerRef.current.scrollHeight; } }, [chatHistory, isHistoryExpanded]);
+    useEffect(() => { if (drawerRef.current && isHistoryExpanded) { drawerRef.current.scrollTop = drawerRef.current.scrollHeight; } }, [historyItems, isHistoryExpanded]);
+
+    const openWorkspaceFromConversation = () => {
+      openAgentWorkspaceWindow().catch((error) => console.error('Failed to open workspace window:', error));
+    };
     useEffect(() => { if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.style.height = (inputRef.current.scrollHeight) + 'px'; if (inputValue === '') { inputRef.current.style.height = '48px'; } } }, [inputValue]);
 
     useEffect(() => {
@@ -1044,20 +1167,14 @@ function App() {
         unlisten = dispose;
       });
 
-      let unlistenProgress: (() => void) | null = null;
-      listen('AGENT_PROGRESS_UPDATE', (event) => {
-        setAgentProgress(event.payload);
-      }).then((dispose) => {
-        unlistenProgress = dispose;
-      });
-
       let unlistenAnswer: (() => void) | null = null;
       listen<{ answer?: string; error?: string }>('AGENT_ANSWER', (event) => {
         const { answer, error } = event.payload;
-        if (answer) {
-          setChatHistory((prev) => [...prev, { role: 'assistant', content: answer }]);
+        if (typeof answer === 'string') {
+          setInteractionState('SUCCESS');
         } else if (error) {
           console.error('Agent error:', error);
+          setInteractionState('ERROR');
         }
       }).then((dispose) => {
         unlistenAnswer = dispose;
@@ -1065,7 +1182,6 @@ function App() {
 
       let unlistenDone: (() => void) | null = null;
       listen('AGENT_DONE', () => {
-        setAgentProgress(null);
         setIsProcessing(false);
         setInteractionState('IDLE');
       }).then((dispose) => {
@@ -1077,7 +1193,6 @@ function App() {
           window.clearTimeout(sendUnlockTimeoutRef.current);
         }
         unlisten?.();
-        unlistenProgress?.();
         unlistenAnswer?.();
         unlistenDone?.();
         void stopRecording();
@@ -1087,10 +1202,9 @@ function App() {
     const handleAction = async (e?: React.FormEvent) => {
         if (e) e.preventDefault(); const message = inputValue.trim(); if (!message || isProcessing) return;
         setInputValue(""); setIsProcessing(true); setInteractionState('PROCESSING');
-        const userMsg: ChatMessage = { role: 'user', content: message }; const updatedHistory = [...chatHistory, userMsg]; setChatHistory(updatedHistory);
         try {
             // chat_local is now async, returns immediately.
-            await invoke("chat_local", { message, history: updatedHistory });
+        await invoke("chat_local", { message, history: runtimeMessages });
             // The result will come back via AGENT_PROGRESS_UPDATE and AGENT_PROPOSALS_SYNC
         } catch (invokeErr) {
             console.error("Local chat failed:", invokeErr);
@@ -1172,7 +1286,7 @@ function App() {
             {/* --- THE HISTORY NOTCH (Truly Full-Width Physical Pull-Up) --- */}
             <div className="w-full z-40 relative pointer-events-none">
                 <AnimatePresence>
-                    {(chatHistory.length > 0 || isProcessing) && (
+                {(historyItems.length > 0 || isProcessing) && (
                         <motion.div 
                             initial={{ height: 0 }} 
                             animate={{ height: isHistoryExpanded ? 'auto' : '24px' }} 
@@ -1213,23 +1327,85 @@ function App() {
                                             exit={{ opacity: 0 }}
                                             className="px-8 pb-10 pt-2 border-t border-white/[0.03]"
                                         >
+                                            {supportsDesktopWindowControls && (
+                                              <div className="mb-4 flex items-center justify-between gap-3">
+                                                <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/24">Agent Session</div>
+                                                <div className="flex items-center gap-2">
+                                                  <button
+                                                    type="button"
+                                                    onClick={openWorkspaceFromConversation}
+                                                    className="h-8 rounded-full border border-white/[0.08] bg-white/[0.04] px-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/55 hover:text-white hover:bg-white/[0.08] transition-all"
+                                                  >
+                                                    <MessageSquareText size={13} />
+                                                    <span>Open Workspace</span>
+                                                    <ExternalLink size={12} />
+                                                  </button>
+                                                </div>
+                                              </div>
+                                            )}
                                             <div ref={drawerRef} className="max-h-[280px] overflow-y-auto pr-4 custom-scrollbar flex flex-col gap-6">
-                                                {chatHistory.filter(m => m.role !== 'system').map((msg, i) => (
-                                                    <div key={i} className={cn(
-                                                        "text-[14px] leading-relaxed transition-opacity duration-500",
-                                                        msg.role === 'user' ? "text-white/70 pl-5 border-l border-white/[0.04]" : "text-white/30 italic font-light"
-                                                    )}>
-                                                        <div className="text-[9px] font-bold uppercase tracking-[0.2em] opacity-30 mb-1.5">
-                                                          {msg.role === 'user' ? t('user') : t('agent')}
-                                                        </div>
-                                                        {msg.content}
+                                              {historyItems.map((item) => (
+                                                <div key={item.id} className={cn(
+                                                  "text-[14px] leading-relaxed transition-opacity duration-500",
+                                                  item.kind === 'user_message' && "text-white/70 pl-5 border-l border-white/[0.04]",
+                                                  item.kind === 'assistant_response' && "text-white/38 italic font-light",
+                                                  item.kind === 'tool_call' && "text-white/62",
+                                                  item.kind === 'tool_result' && "text-white/40",
+                                                  item.kind === 'reasoning' && "text-white/32"
+                                                )}>
+                                                  <div className="text-[9px] font-bold uppercase tracking-[0.2em] opacity-30 mb-1.5">
+                                                    {item.kind === 'user_message' && t('user')}
+                                                    {item.kind === 'assistant_response' && t('agent')}
+                                                          {item.kind === 'tool_call' && 'Function call'}
+                                                          {item.kind === 'tool_result' && 'Function result'}
+                                                    {item.kind === 'reasoning' && 'Reasoning'}
+                                                  </div>
+                                                  {item.kind === 'user_message' && item.content}
+                                                  {item.kind === 'assistant_response' && item.content}
+                                                  {item.kind === 'tool_call' && (
+                                                    <div className="rounded-[14px] border border-white/[0.05] bg-white/[0.03] px-3 py-2">
+                                                                <div className="flex items-center gap-2 mb-2">
+                                                                    {(() => {
+                                                                      const Icon = getToolIcon(item.name);
+                                                                      return <Icon size={14} className="text-white/52" />;
+                                                                    })()}
+                                                                    <div className="text-[12px] text-white/82">{formatToolName(item.name)}</div>
+                                                                </div>
+                                                                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                                                  {parseToolArguments(item.arguments).map((entry) => (
+                                                                    <div key={`${item.id}-${entry.key}`} className="rounded-[12px] border border-white/[0.04] bg-black/20 px-2.5 py-2">
+                                                                      <div className="text-[9px] uppercase tracking-[0.16em] text-white/26 mb-1">{entry.key}</div>
+                                                                      <div className="text-[12px] leading-relaxed text-white/58 break-words">{entry.value}</div>
+                                                                    </div>
+                                                                  ))}
+                                                                </div>
                                                     </div>
-                                                ))}
+                                                  )}
+                                                  {item.kind === 'tool_result' && (
+                                                    <div className="rounded-[14px] border border-white/[0.05] bg-white/[0.02] px-3 py-2">
+                                                                <div className="flex items-center gap-2 mb-1.5">
+                                                                    {(() => {
+                                                                      const Icon = getToolIcon(item.name);
+                                                                      return <Icon size={14} className="text-white/40" />;
+                                                                    })()}
+                                                                    <div className="text-[12px] text-white/60">{formatToolName(item.name)}</div>
+                                                                </div>
+                                                      <div className="text-[12px] text-white/42">{item.content}</div>
+                                                    </div>
+                                                  )}
+                                                  {item.kind === 'reasoning' && (
+                                                    <div className="flex items-center gap-3">
+                                                      <div className="w-2 h-2 rounded-full bg-white/35 animate-pulse" />
+                                                      <div className="text-[12px] text-white/48">Iteration {item.iteration + 1} · {item.phase.replace(/_/g, ' ')}</div>
+                                                    </div>
+                                                  )}
+                                                </div>
+                                              ))}
                                             </div>
                                         </motion.div>
                                     )}
                                 </AnimatePresence>
-                            </div>
+                                    </div>
                         </motion.div>
                     )}
                 </AnimatePresence>
@@ -1268,6 +1444,22 @@ function App() {
                           </div>
                         )}
                         <textarea ref={inputRef} value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAction(); } }} placeholder={interactionState === 'AWAITING_REPLY' ? t('placeholderReplyAgent') : placeholder} className={cn("flex-1 bg-transparent border-none text-[#d1d1d1] text-[14px] outline-none resize-none min-h-[40px] max-h-[120px] leading-[1.6] relative z-10 transition-colors", interactionState === 'AWAITING_REPLY' ? "text-white placeholder:text-white/30" : "placeholder:text-[#555]")} />
+                        {supportsDesktopWindowControls && agentFilesystemMount?.folder_picker_supported ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void pickAgentFilesystemMount();
+                            }}
+                            disabled={isProcessing}
+                            className={cn(
+                              "border-none w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition-all shrink-0 ml-4 mb-0 relative z-10 hover:scale-105 active:scale-95 disabled:opacity-30",
+                              agentFilesystemMount?.host_path ? "bg-white/14 text-white" : "bg-white/10 text-white/72 hover:text-white"
+                            )}
+                            title={agentFilesystemMount?.host_path ?? 'Mount directory'}
+                          >
+                            <Plus size={18} />
+                          </button>
+                        ) : null}
                         {isRecording ? (
                           <button
                             type="button"
@@ -1276,14 +1468,14 @@ function App() {
                             }}
                             disabled={isProcessing}
                             className={cn(
-                              "border-none w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition-all shrink-0 ml-4 mb-0 relative z-10 hover:scale-105 active:scale-95 disabled:opacity-30",
+                              "border-none w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition-all shrink-0 ml-2 mb-0 relative z-10 hover:scale-105 active:scale-95 disabled:opacity-30",
                               "bg-white text-black"
                             )}
                             title="Stop recording"
                           >
                             <Square size={16} />
                           </button>
-                        ) : hasDraftText ? <button type="submit" disabled={isProcessing || !hasDraftText || isSendTemporarilyLocked} className={cn("send-btn border-none w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition-all shrink-0 ml-4 mb-0 relative z-10 hover:scale-105 active:scale-95 disabled:opacity-30", interactionState === 'AWAITING_REPLY' ? "bg-white text-black shadow-[0_0_15px_rgba(255,255,255,0.2)]" : "bg-white text-black")}><Send size={20} /></button> : voiceSettings?.mode !== 'Disabled' ? (
+                        ) : hasDraftText ? <button type="submit" disabled={isProcessing || !hasDraftText || isSendTemporarilyLocked} className={cn("send-btn border-none w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition-all shrink-0 ml-2 mb-0 relative z-10 hover:scale-105 active:scale-95 disabled:opacity-30", interactionState === 'AWAITING_REPLY' ? "bg-white text-black shadow-[0_0_15px_rgba(255,255,255,0.2)]" : "bg-white text-black")}><Send size={20} /></button> : voiceSettings?.mode !== 'Disabled' ? (
                           <button
                             type="button"
                             onClick={() => {
@@ -1291,7 +1483,7 @@ function App() {
                             }}
                             disabled={isProcessing || !voiceInputEnabled}
                             className={cn(
-                              "border-none w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition-all shrink-0 ml-4 mb-0 relative z-10 hover:scale-105 active:scale-95 disabled:opacity-30",
+                              "border-none w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition-all shrink-0 ml-2 mb-0 relative z-10 hover:scale-105 active:scale-95 disabled:opacity-30",
                               "bg-white/10 text-white"
                             )}
                             title="Start voice input"

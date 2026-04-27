@@ -113,6 +113,14 @@ struct OpenAiChatRequest<'a> {
     tool_choice: Option<&'a str>,
 }
 
+fn openai_tool_choice(tools: Option<&[Tool]>) -> Option<&'static str> {
+    if tools.is_some() {
+        Some("required")
+    } else {
+        None
+    }
+}
+
 #[derive(Deserialize)]
 struct OpenAiChatResponse {
     choices: Vec<Choice>,
@@ -194,7 +202,7 @@ pub async fn generate_openai_content(
         messages: mapped_messages,
         temperature: Some(0.7),
         tools,
-        tool_choice: if tools.is_some() { Some("auto") } else { None },
+        tool_choice: openai_tool_choice(tools),
     };
 
     let mut headers = reqwest::header::HeaderMap::new();
@@ -289,8 +297,16 @@ pub async fn generate_openai_content(
 
 #[cfg(test)]
 mod tests {
-    use super::{map_openai_tool_calls, OpenAiMessage};
+    use super::{map_openai_tool_calls, openai_tool_choice, OpenAiMessage};
     use crate::provider::{Message, Role, ToolCall, ToolFunctionCall};
+
+    #[test]
+    fn forces_tool_choice_when_tools_are_available() {
+        let tools: [crate::provider::Tool; 0] = [];
+
+        assert_eq!(openai_tool_choice(Some(&tools)), Some("required"));
+        assert_eq!(openai_tool_choice(None), None);
+    }
 
     #[test]
     fn assistant_tool_calls_are_serialized_for_openai_compatible_requests() {

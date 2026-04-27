@@ -383,6 +383,7 @@ pub struct WorkspaceState {
     pub budget: ContextBudget,
     pub dock: DockState,
     pub filesystem_cwd: VirtualPath,
+    pub filesystem_mount_host_path: Option<String>,
     pub scratchpad: ScratchpadApp,
     pub web_search: SearchApp,
     pub stack_search: SearchApp,
@@ -400,6 +401,7 @@ impl Default for WorkspaceState {
             budget: ContextBudget::default(),
             dock: DockState::default(),
             filesystem_cwd: VirtualPath::root(),
+            filesystem_mount_host_path: None,
             scratchpad: ScratchpadApp::default(),
             web_search: SearchApp::new(AppId::WebSearch, SearchAppKind::Web),
             stack_search: SearchApp::new(AppId::StackSearch, SearchAppKind::Stack),
@@ -893,12 +895,31 @@ impl WorkspaceState {
         let mounted_labels = mounted_apps.iter().map(|app_id| app_id.label()).collect::<Vec<_>>().join(", ");
 
         let mut content = format!(
-            "DOCK\nfocused: {}\npinned: [{}]\nopen: [{}]\nmounted: [{}]\n",
+            "DOCK\nfocused: {}\npinned: [{}]\nopen: [{}]\nmounted: [{}]\nfilesystem_mount: {}\n",
             self.dock.focused_app.label(),
             pinned_apps,
             open_apps,
             mounted_labels,
+            self.filesystem_mount_host_path.as_deref().unwrap_or("none"),
         );
+        if self.filesystem_mount_host_path.is_some() {
+            content.push_str("filesystem_root_virtual: /\n");
+            if self.file_tree.entries.is_empty() {
+                content.push_str("filesystem_root_preview: none\n");
+            } else {
+                let preview = self
+                    .file_tree
+                    .entries
+                    .iter()
+                    .take(6)
+                    .map(|entry| entry.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                content.push_str("filesystem_root_preview: ");
+                content.push_str(&preview);
+                content.push('\n');
+            }
+        }
         for entry in entries.into_iter().flatten() {
             content.push_str("- ");
             content.push_str(&entry);
@@ -1511,6 +1532,9 @@ pub fn workspace_runtime_snapshot(memory: &crate::memory::WorkingMemory) -> Valu
                 .collect::<Vec<_>>(),
         },
         "apps": {
+            "filesystem_mount": {
+                "host_path": memory.workspace.filesystem_mount_host_path,
+            },
             "scratchpad": {
                 "lifecycle": format!("{:?}", memory.workspace.scratchpad.lifecycle),
                 "lines": memory.workspace.scratchpad.document_lines.len(),

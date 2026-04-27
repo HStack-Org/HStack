@@ -2581,6 +2581,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_workspace_projection_includes_filesystem_mount_and_root_preview() {
+        let mut memory = WorkingMemory::new();
+        memory.workspace.filesystem_mount_host_path = Some("/host/project/mounted".to_string());
+        memory.workspace.file_tree.entries = vec![
+            hstack_core::filesystem::DirectoryEntry {
+                path: hstack_core::virtual_fs::VirtualPath::from_absolute("/mounted").unwrap_or_else(|e| panic!("virtual path failed: {e}")),
+                name: "mounted".to_string(),
+                kind: hstack_core::filesystem::FsObjectKind::Directory,
+                conflict_token: None,
+            },
+            hstack_core::filesystem::DirectoryEntry {
+                path: hstack_core::virtual_fs::VirtualPath::from_absolute("/src").unwrap_or_else(|e| panic!("virtual path failed: {e}")),
+                name: "src".to_string(),
+                kind: hstack_core::filesystem::FsObjectKind::Directory,
+                conflict_token: None,
+            },
+        ];
+
+        let projection = render_workspace_projection(&memory, &[]);
+
+        assert!(projection.contains("filesystem_mount: /host/project/mounted"));
+        assert!(projection.contains("filesystem_root_virtual: /"));
+        assert!(projection.contains("filesystem_root_preview: mounted, src"));
+    }
+
+    #[tokio::test]
     async fn test_prompt_explicitly_separates_local_search_web_search_and_compute() {
         let prompt = build_base_prompt(AgentPromptProfile::DebugInteractive);
         assert!(prompt.contains("If the answer should come from the user's own HStack items, use `search_stack`."));

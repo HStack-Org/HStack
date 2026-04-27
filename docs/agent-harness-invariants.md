@@ -55,6 +55,20 @@ The harness is action-based.
 
 Corollary: assistant text without a valid terminal action is not a user reply.
 
+## Provider Boundary
+
+The action-only contract must be enforced as early as the provider transport allows.
+
+- If a provider API supports a mode that requires tool calling when tools are supplied, the harness
+    adapter must use that mode.
+- A weaker preference mode such as automatic tool selection is not sufficient when the protocol
+    requires tool-grounded turns.
+- Decode-time rejection of free assistant prose is still required, but it is a fail-closed backstop,
+    not a license to ask the provider for unconstrained prose in the first place.
+
+For the current OpenAI-compatible adapter, this means `tool_choice` must be forced to `required`
+whenever tools are present.
+
 ## What Counts As Progress
 
 Progress means a validated transition in the action algebra.
@@ -119,6 +133,7 @@ The following behaviors must be covered by tests:
 6. A query that hits the max-iteration policy must still terminate with a reply.
 7. If forced terminalization fails to decode a valid identity action, the host must emit the
     deterministic terminal fallback instead of returning a protocol-level failure.
+8. Provider adapters that support forced tool mode must request it whenever tools are present.
 
 Those tests live in `crates/hstack-agent/src/tests.rs` and should be kept aligned with this document.
 

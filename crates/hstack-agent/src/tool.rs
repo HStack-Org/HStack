@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use std::path::PathBuf;
 
 use crate::action::AgentAction;
 use crate::error::Error;
@@ -14,6 +15,7 @@ pub mod identity;
 pub mod light_compute;
 pub mod manage_app;
 pub mod microbash;
+pub mod open_app;
 pub mod scratchpad_edit;
 pub mod scratchpad_search;
 pub mod scratch_thought;
@@ -30,6 +32,7 @@ pub use identity::IdentityTool;
 pub use light_compute::LightComputeTool;
 pub use manage_app::ManageAppTool;
 pub use microbash::MicrobashTool;
+pub use open_app::OpenAppTool;
 pub use scratchpad_edit::ScratchpadEditTool;
 pub use scratchpad_search::ScratchpadSearchTool;
 pub use scratch_thought::ScratchThought;
@@ -66,6 +69,7 @@ pub fn available_tools() -> &'static [&'static str] {
         "scratch_thought",
         "web_search",
         "light_compute",
+        "open_app",
         "manage_app",
         "inspect_app",
         "editor_edit",
@@ -88,6 +92,13 @@ pub fn available_tools() -> &'static [&'static str] {
 
 /// Builds a toolset from ordered names, allowing composition per runtime/preset.
 pub fn compose_tools(names: &[&str]) -> Result<Vec<Box<dyn Tool>>, Error> {
+    compose_tools_with_filesystem_root(names, None)
+}
+
+pub fn compose_tools_with_filesystem_root(
+    names: &[&str],
+    filesystem_root: Option<PathBuf>,
+) -> Result<Vec<Box<dyn Tool>>, Error> {
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
     for &name in names {
@@ -108,11 +119,21 @@ pub fn compose_tools(names: &[&str]) -> Result<Vec<Box<dyn Tool>>, Error> {
                 }
                 Box::new(LightComputeTool::new()) as Box<dyn Tool>
             }
+            "open_app" => Box::new(OpenAppTool) as Box<dyn Tool>,
             "manage_app" => Box::new(ManageAppTool) as Box<dyn Tool>,
             "inspect_app" => Box::new(InspectAppTool) as Box<dyn Tool>,
-            "editor_edit" => Box::new(EditorEditTool::new()) as Box<dyn Tool>,
-            "microbash" => Box::new(MicrobashTool::new()) as Box<dyn Tool>,
-            "filesystem_patch" => Box::new(FilesystemPatchTool::new()) as Box<dyn Tool>,
+            "editor_edit" => match &filesystem_root {
+                Some(root) => Box::new(EditorEditTool::new_with_root(root.clone())) as Box<dyn Tool>,
+                None => Box::new(EditorEditTool::new()) as Box<dyn Tool>,
+            },
+            "microbash" => match &filesystem_root {
+                Some(root) => Box::new(MicrobashTool::new_with_root(root.clone())) as Box<dyn Tool>,
+                None => Box::new(MicrobashTool::new()) as Box<dyn Tool>,
+            },
+            "filesystem_patch" => match &filesystem_root {
+                Some(root) => Box::new(FilesystemPatchTool::new_with_root(root.clone())) as Box<dyn Tool>,
+                None => Box::new(FilesystemPatchTool::new()) as Box<dyn Tool>,
+            },
             "scratchpad_search" => Box::new(ScratchpadSearchTool) as Box<dyn Tool>,
             "execution_request" => Box::new(ExecutionRequestTool) as Box<dyn Tool>,
             "scratchpad_edit" => Box::new(ScratchpadEditTool) as Box<dyn Tool>,

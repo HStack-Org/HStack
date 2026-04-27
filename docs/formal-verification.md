@@ -24,6 +24,18 @@ These properties are encoded in [crates/hstack-agent/src/formal.rs](crates/hstac
 The formal module is intentionally small and pure. It is not a second runtime.
 It is a verifier-oriented semantic skeleton for the protocol rules that must not regress.
 
+## Provider Adapter Contract
+
+Some protocol guarantees sit one layer earlier than decode: if a provider transport supports
+mandatory tool calling, the adapter must enable that mode whenever tools are present.
+
+For the current OpenAI-compatible adapter, `tool_choice` must be `required`, not `auto`, when
+the harness supplies tools. This is currently locked by provider unit tests in
+`crates/hstack-agent/src/provider/openai_compat.rs`.
+
+This transport-level invariant is not yet lifted into the pure Kani model, which focuses on decode
+and terminal semantics after a provider response has already been received.
+
 ## Local Unit Checks
 
 The pure model is also covered by ordinary tests:

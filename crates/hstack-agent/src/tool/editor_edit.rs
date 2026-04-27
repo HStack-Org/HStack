@@ -25,12 +25,16 @@ impl EditorEditTool {
         }
     }
 
-    #[cfg(test)]
-    pub fn new_for_tests(root: PathBuf) -> Self {
+    pub fn new_with_root(root: PathBuf) -> Self {
         Self {
             sandbox_root_override: Some(root),
             capability_profile: CapabilityProfile::ProjectSandbox,
         }
+    }
+
+    #[cfg(test)]
+    pub fn new_for_tests(root: PathBuf) -> Self {
+        Self::new_with_root(root)
     }
 
     fn backend(&self) -> Result<LocalSandboxedFilesystem, Error> {

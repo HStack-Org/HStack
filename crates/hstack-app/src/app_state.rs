@@ -1,7 +1,12 @@
 use chrono::Utc;
+use hstack_agent::filesystem::LocalSandboxedFilesystem;
+use hstack_agent::workspace::AppLifecycle;
+use hstack_core::filesystem::FilesystemPolicy;
 use hstack_core::settings::{SavedProvider, SyncMode, UserSettings};
 use hstack_core::sync::{project_state, reconcile_state, SyncAction, SyncActionType};
 use hstack_core::ticket::{Ticket, TicketPayload, TicketStatus};
+use hstack_core::virtual_fs::VirtualPath;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_store::StoreExt;
 use uuid::Uuid;
@@ -12,6 +17,8 @@ use crate::sync_runtime::SYNC_TICKETS_CHANGED_EVENT;
 
 const SYNC_TOKEN_KEY: &str = "hstack-sync-token";
 pub(crate) const VOICE_DIRECT_API_KEY_KEY: &str = "hstack-voice-direct-api-key";
+const AGENT_WORKSPACE_STORE: &str = "agent_workspace.json";
+const AGENT_FILESYSTEM_MOUNT_KEY: &str = "filesystem_mount_root";
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SyncSessionInfo {
@@ -23,6 +30,85 @@ pub(crate) struct SyncSessionInfo {
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct VoiceSecretStatus {
     pub(crate) direct_api_key_present: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct AgentFilesystemMountState {
+    pub(crate) host_path: Option<String>,
+    pub(crate) folder_picker_supported: bool,
+}
+
+fn agent_folder_picker_supported() -> bool {
+    cfg!(any(target_os = "macos", target_os = "windows", target_os = "linux"))
+}
+
+fn load_agent_filesystem_mount_path(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    let store = app.store(AGENT_WORKSPACE_STORE)
+        .map_err(|e| format!("Agent workspace store failure: {e}"))?;
+
+    match store.get(AGENT_FILESYSTEM_MOUNT_KEY) {
+        Some(value) => {
+            let raw = serde_json::from_value::<Option<String>>(value)
+                .map_err(|e| format!("Failed to parse agent filesystem mount: {e}"))?;
+            Ok(raw.map(PathBuf::from))
+        }
+        None => Ok(None),
+    }
+}
+
+fn save_agent_filesystem_mount_path(app: &AppHandle, path: Option<&Path>) -> Result<(), String> {
+    let store = app.store(AGENT_WORKSPACE_STORE)
+        .map_err(|e| format!("Agent workspace store failure: {e}"))?;
+
+    let value = path.map(|mounted| mounted.to_string_lossy().to_string());
+    store.set(AGENT_FILESYSTEM_MOUNT_KEY, serde_json::json!(value));
+    store.save().map_err(|e| format!("Failed to save agent filesystem mount: {e}"))
+}
+
+pub(crate) fn get_agent_filesystem_mount_path(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    load_agent_filesystem_mount_path(app)
+}
+
+fn reset_agent_filesystem_workspace(memory: &mut hstack_agent::memory::WorkingMemory) {
+    memory.workspace.filesystem_cwd = VirtualPath::root();
+    memory.workspace.filesystem_mount_host_path = None;
+    memory.workspace.file_tree = hstack_agent::workspace::FileTreeApp::default();
+    memory.workspace.editor = hstack_agent::workspace::EditorApp::default();
+    memory.workspace.file_search = hstack_agent::workspace::FilesystemSearchApp::default();
+    memory.workspace.jobs = hstack_agent::workspace::JobApp::default();
+}
+
+pub(crate) fn sync_agent_filesystem_mount_into_memory(
+    memory: &mut hstack_agent::memory::WorkingMemory,
+    mounted_root: Option<&Path>,
+) -> Result<(), String> {
+    reset_agent_filesystem_workspace(memory);
+
+    let Some(mounted_root) = mounted_root else {
+        return Ok(());
+    };
+
+    let backend = LocalSandboxedFilesystem::new(
+        mounted_root.to_path_buf(),
+        FilesystemPolicy::project_sandbox(VirtualPath::root()),
+    )
+    .map_err(|e| format!("Failed to initialize mounted filesystem root: {e}"))?;
+    let entries = backend
+        .list_dir(&VirtualPath::root(), None)
+        .map_err(|e| format!("Failed to list mounted filesystem root: {e}"))?;
+
+    memory.workspace.filesystem_mount_host_path = Some(mounted_root.to_string_lossy().to_string());
+    memory.workspace.file_tree.lifecycle = AppLifecycle::OpenMounted;
+    memory.workspace.file_tree.cwd = VirtualPath::root();
+    memory.workspace.file_tree.entries = entries;
+    Ok(())
+}
+
+fn mount_state_from_path(path: Option<PathBuf>) -> AgentFilesystemMountState {
+    AgentFilesystemMountState {
+        host_path: path.map(|mounted| mounted.to_string_lossy().to_string()),
+        folder_picker_supported: agent_folder_picker_supported(),
+    }
 }
 
 #[tauri::command]
@@ -196,6 +282,81 @@ pub(crate) async fn save_agent_memory(app: AppHandle, memory: hstack_agent::memo
 pub async fn get_agent_proposals(app: AppHandle) -> Result<Vec<SyncAction>, String> {
     let memory = load_agent_memory(app).await?;
     Ok(memory.proposed_stack_actions)
+}
+
+#[tauri::command]
+pub async fn get_agent_filesystem_mount(app: AppHandle) -> Result<AgentFilesystemMountState, String> {
+    let path = load_agent_filesystem_mount_path(&app)?;
+    Ok(mount_state_from_path(path))
+}
+
+#[tauri::command]
+pub async fn pick_agent_filesystem_mount(app: AppHandle) -> Result<AgentFilesystemMountState, String> {
+    if !agent_folder_picker_supported() {
+        return Err("Directory mounting is not supported on this platform yet".to_string());
+    }
+
+    use tauri_plugin_dialog::{DialogExt, FilePath};
+
+    let selected = app.dialog().file().blocking_pick_folder();
+    let Some(selected) = selected else {
+        let existing = load_agent_filesystem_mount_path(&app)?;
+        return Ok(mount_state_from_path(existing));
+    };
+
+    let chosen = match selected {
+        FilePath::Path(path) => path,
+        FilePath::Url(url) => {
+            return Err(format!(
+                "Directory mounting requires a local filesystem path, got URI '{url}'"
+            ))
+        }
+    };
+
+    let canonical = std::fs::canonicalize(&chosen)
+        .map_err(|e| format!("Failed to resolve selected directory: {e}"))?;
+    if !canonical.is_dir() {
+        return Err("Selected mount is not a directory".to_string());
+    }
+
+    save_agent_filesystem_mount_path(&app, Some(canonical.as_path()))?;
+    let mut memory = load_agent_memory(app.clone()).await?;
+    sync_agent_filesystem_mount_into_memory(&mut memory, Some(canonical.as_path()))?;
+    save_agent_memory(app.clone(), memory).await?;
+
+    let _ = app.emit("AGENT_WORKSPACE_SYNC", ());
+    let _ = app.emit("AGENT_FILESYSTEM_MOUNT_SYNC", ());
+    Ok(mount_state_from_path(Some(canonical)))
+}
+
+#[tauri::command]
+pub async fn clear_agent_filesystem_mount(app: AppHandle) -> Result<(), String> {
+    save_agent_filesystem_mount_path(&app, None)?;
+    let mut memory = load_agent_memory(app.clone()).await?;
+    sync_agent_filesystem_mount_into_memory(&mut memory, None)?;
+    save_agent_memory(app.clone(), memory).await?;
+    let _ = app.emit("AGENT_WORKSPACE_SYNC", ());
+    let _ = app.emit("AGENT_FILESYSTEM_MOUNT_SYNC", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_agent_workspace(app: AppHandle) -> Result<hstack_agent::workspace::WorkspaceState, String> {
+    let memory = load_agent_memory(app).await?;
+    Ok(memory.workspace)
+}
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct AgentSessionState {
+    pub(crate) messages: Vec<hstack_agent::provider::Message>,
+}
+
+#[tauri::command]
+pub async fn get_agent_session(app: AppHandle) -> Result<AgentSessionState, String> {
+    let memory = load_agent_memory(app).await?;
+    Ok(AgentSessionState {
+        messages: memory.messages,
+    })
 }
 
 #[tauri::command]

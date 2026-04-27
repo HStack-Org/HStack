@@ -9,7 +9,7 @@ mod secure_store;
 mod sync_runtime;
 mod voice_runtime;
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use rustls::crypto::ring::default_provider;
 use hstack_core::provider::{Message, ProviderConfig};
 use secure_store::SecureStore;
@@ -20,8 +20,26 @@ pub(crate) use app_state::{append_pending_action, apply_sync_update_state, get_s
 use hstack_agent::provider::{OpenAiProvider, GeminiProvider};
 use hstack_agent::{Agent, AgentPromptProfile, build_base_prompt};
 use hstack_agent::manager::SimpleContextManager;
+use hstack_agent::agent::AgentProgressUpdate;
 use tauri::Emitter;
 use crate::agent_integration::{TauriAgentControl, TauriHStackWorld};
+
+fn agent_tool_names() -> Vec<&'static str> {
+    let mut tool_names = vec![
+        "create_ticket", "delete_ticket", "delete_all_tickets", "edit_ticket",
+        "add_commute", "get_directions", "remove_commute", "start_live_directions",
+        "create_countdown", "identity", "follow_up", "search_stack", "scratch_thought",
+        "open_app", "manage_app", "inspect_app", "scratchpad_search", "scratchpad_edit",
+        "microbash", "editor_edit", "filesystem_patch",
+    ];
+    if hstack_agent::tool::web_search_is_available() {
+        tool_names.push("web_search");
+    }
+    if hstack_agent::tool::light_compute_is_available() {
+        tool_names.push("light_compute");
+    }
+    tool_names
+}
 
 #[tauri::command]
 async fn chat_local(app: AppHandle, message: String, _history: Vec<Message>) -> Result<Vec<Message>, String> {
@@ -57,26 +75,26 @@ async fn chat_local(app: AppHandle, message: String, _history: Vec<Message>) -> 
                 return;
             }
         };
+        let filesystem_root = crate::app_state::get_agent_filesystem_mount_path(&app_clone).ok().flatten();
+        if let Err(e) = crate::app_state::sync_agent_filesystem_mount_into_memory(&mut memory, filesystem_root.as_deref()) {
+            println!("Failed to sync agent filesystem mount: {e}");
+            let _ = app_clone.emit("AGENT_ANSWER", serde_json::json!({
+                "answer": null,
+                "error": e,
+            }));
+            let _ = app_clone.emit("AGENT_WORKSPACE_SYNC", ());
+            let _ = app_clone.emit("AGENT_DONE", ());
+            return;
+        }
         
         let provider: Box<dyn hstack_agent::provider::LlmProvider> = match config.kind {
             hstack_core::provider::ProviderKind::OpenAiCompatible => Box::new(OpenAiProvider::new(config.clone(), None)),
             hstack_core::provider::ProviderKind::Gemini => Box::new(GeminiProvider::new(config.clone(), None)),
         };
 
-        let mut tool_names = vec![
-            "create_ticket", "delete_ticket", "delete_all_tickets", "edit_ticket",
-            "add_commute", "get_directions", "remove_commute", "start_live_directions",
-            "create_countdown", "identity", "follow_up", "search_stack", "scratch_thought",
-            "manage_app", "inspect_app", "scratchpad_search", "scratchpad_edit",
-        ];
-        if hstack_agent::tool::web_search_is_available() {
-            tool_names.push("web_search");
-        }
-        if hstack_agent::tool::light_compute_is_available() {
-            tool_names.push("light_compute");
-        }
+        let tool_names = agent_tool_names();
 
-        let tools = hstack_agent::tool::compose_tools(&tool_names).unwrap_or_default();
+        let tools = hstack_agent::tool::compose_tools_with_filesystem_root(&tool_names, filesystem_root).unwrap_or_default();
         
         let agent = Agent {
             provider,
@@ -94,9 +112,24 @@ async fn chat_local(app: AppHandle, message: String, _history: Vec<Message>) -> 
             name: None,
         });
 
+        if let Err(e) = crate::app_state::save_agent_memory(app_clone.clone(), memory.clone()).await {
+            println!("Failed to save agent memory before run: {e}");
+        }
+        let _ = app_clone.emit("AGENT_SESSION_SYNC", ());
+
         let world = TauriHStackWorld { app: app_clone.clone() };
 
-        let run_result = agent.run(&world, &mut memory).await;
+        let progress_app = app_clone.clone();
+        let run_result = agent.run_with_progress(&world, &mut memory, move |update: AgentProgressUpdate| {
+            let payload = serde_json::json!({
+                "iteration": update.iteration,
+                "phase": update.phase,
+                "session": {
+                    "messages": update.working_memory.messages,
+                }
+            });
+            let _ = progress_app.emit("AGENT_PROGRESS_UPDATE", payload);
+        }).await;
 
         match &run_result {
             Ok((answer, _deltas)) => {
@@ -117,11 +150,74 @@ async fn chat_local(app: AppHandle, message: String, _history: Vec<Message>) -> 
             println!("Failed to save agent memory: {e}");
         }
         
+        let _ = app_clone.emit("AGENT_SESSION_SYNC", ());
         let _ = app_clone.emit("AGENT_PROPOSALS_SYNC", ());
+        let _ = app_clone.emit("AGENT_WORKSPACE_SYNC", ());
         let _ = app_clone.emit("AGENT_DONE", ());
     });
 
     Ok(vec![])
+}
+
+#[tauri::command]
+async fn open_agent_workspace_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("workspace") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+
+    let window = WebviewWindowBuilder::new(
+        &app,
+        "workspace",
+        WebviewUrl::App("index.html?view=workspace".into()),
+    )
+    .title("HStack Workspace")
+    .inner_size(560.0, 780.0)
+    .min_inner_size(420.0, 520.0)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .build()
+    .map_err(|error| format!("failed to create workspace window: {error}"))?;
+
+    let _ = window.show();
+    let _ = window.set_focus();
+    Ok(())
+}
+
+#[tauri::command]
+async fn minimize_agent_workspace_window(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("workspace")
+        .ok_or_else(|| "workspace window not found".to_string())?;
+
+    window
+        .minimize()
+        .map_err(|error| format!("failed to minimize workspace window: {error}"))
+}
+
+#[tauri::command]
+async fn close_agent_workspace_window(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("workspace")
+        .ok_or_else(|| "workspace window not found".to_string())?;
+
+    window
+        .close()
+        .map_err(|error| format!("failed to close workspace window: {error}"))
+}
+
+#[tauri::command]
+async fn start_agent_workspace_drag(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("workspace")
+        .ok_or_else(|| "workspace window not found".to_string())?;
+
+    window
+        .start_dragging()
+        .map_err(|error| format!("failed to drag workspace window: {error}"))
 }
 
 fn install_rustls_crypto_provider() -> Result<(), String> {
@@ -141,6 +237,7 @@ pub fn run() {
         .manage(NativeSyncRuntimeState::default())
         .manage(voice_runtime::VoiceRuntimeState::default())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .setup(|_app| {
@@ -165,6 +262,10 @@ pub fn run() {
             app_state::save_voice_direct_api_key,
             app_state::clear_voice_direct_api_key,
             chat_local,
+            open_agent_workspace_window,
+            minimize_agent_workspace_window,
+            close_agent_workspace_window,
+            start_agent_workspace_drag,
             app_state::get_tickets,
             app_state::apply_sync_update,
             app_state::get_user_locale,
@@ -173,6 +274,11 @@ pub fn run() {
             app_state::clear_sync_session,
             app_state::complete_onboarding,
             app_state::get_agent_proposals,
+            app_state::get_agent_filesystem_mount,
+            app_state::pick_agent_filesystem_mount,
+            app_state::clear_agent_filesystem_mount,
+            app_state::get_agent_workspace,
+            app_state::get_agent_session,
             app_state::accept_agent_proposals,
             app_state::reject_agent_proposals,
             sync_runtime::start_native_sync,
@@ -222,6 +328,16 @@ mod tests {
     use hstack_core::ticket::{TicketLocation, TicketPayload};
     use serde::Serialize;
     use serde_json::{json, Value};
+
+    #[test]
+    fn agent_toolset_includes_filesystem_tools() {
+        let tool_names = super::agent_tool_names();
+
+        assert!(tool_names.contains(&"microbash"));
+        assert!(tool_names.contains(&"editor_edit"));
+        assert!(tool_names.contains(&"filesystem_patch"));
+        assert!(tool_names.contains(&"open_app"));
+    }
 
     fn must_infer_commute_payload(event_id: &str, payload: &TicketPayload) -> TicketPayload {
         match infer_commute_payload_from_event(event_id, payload) {
