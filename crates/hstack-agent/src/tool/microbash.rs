@@ -63,7 +63,7 @@ impl Tool for MicrobashTool {
     }
 
     fn description(&self) -> &str {
-        "Runs constrained microbash commands against the configured sandboxed workspace and updates file tree, editor, search, and job apps."
+        "Runs constrained microbash commands against the configured sandboxed workspace and updates the dedicated CLI plus filesystem projection apps."
     }
 
     fn parameters(&self) -> Value {
@@ -128,20 +128,115 @@ impl Tool for MicrobashTool {
             "instructions": instructions,
             "outcomes": outcomes,
         });
+        let cli_transcript = build_cli_transcript(&instructions, &outcomes);
 
         let mut actions = vec![
             AgentAction::UpdateWorkingMemory(WorkingMemoryDelta::AddTechnicalNoise(
                 "microbash".to_string(),
                 event.clone(),
             )),
-            AgentAction::UpdateWorkspace(WorkspaceDelta::RecordJob {
-                summary: format!("microbash {command}"),
-                state: "ok".to_string(),
-                detail: event,
-            }),
         ];
         actions.extend(workspace_actions.into_iter().map(AgentAction::UpdateWorkspace));
+        actions.push(AgentAction::UpdateWorkspace(WorkspaceDelta::RecordCli {
+                command: command.to_string(),
+                state: "ok".to_string(),
+                cwd,
+                transcript: cli_transcript,
+            }));
         Ok(AgentAction::Compound(actions))
+    }
+}
+
+fn build_cli_transcript(
+    instructions: &[FilesystemInstruction],
+    outcomes: &[FilesystemOutcome],
+) -> Vec<String> {
+    instructions
+        .iter()
+        .zip(outcomes.iter())
+        .flat_map(|(instruction, outcome)| cli_lines_for_outcome(instruction, outcome))
+        .collect()
+}
+
+fn cli_lines_for_outcome(
+    instruction: &FilesystemInstruction,
+    outcome: &FilesystemOutcome,
+) -> Vec<String> {
+    match (instruction, outcome) {
+        (FilesystemInstruction::ListDir { path, .. }, FilesystemOutcome::ListDir(entries)) => {
+            let mut lines = vec![format!("list {}", path)];
+            if entries.is_empty() {
+                lines.push("(empty directory)".to_string());
+            } else {
+                lines.extend(entries.iter().map(|entry| format!("{} :: {:?}", entry.path, entry.kind)));
+            }
+            lines
+        }
+        (FilesystemInstruction::ReadFile { path, .. }, FilesystemOutcome::ReadFile(result)) => {
+            let mut lines = vec![format!("read {}", path)];
+            match String::from_utf8(result.content.clone()) {
+                Ok(content) => {
+                    let mut content_lines: Vec<String> = content.lines().take(32).map(str::to_string).collect();
+                    if content_lines.is_empty() {
+                        content_lines.push("(empty file)".to_string());
+                    }
+                    lines.extend(content_lines);
+                }
+                Err(_) => lines.push("(binary content omitted)".to_string()),
+            }
+            lines
+        }
+        (FilesystemInstruction::SearchText { scope, query, .. }, FilesystemOutcome::SearchText(matches)) => {
+            let mut lines = vec![format!("search {} in {}", query, scope.root)];
+            if matches.is_empty() {
+                lines.push("(no matches)".to_string());
+            } else {
+                lines.extend(matches.iter().map(|item| {
+                    let line = item.line.unwrap_or(0);
+                    let column = item.column.unwrap_or(0);
+                    format!("{}:{}:{} :: {}", item.path, line, column, item.excerpt)
+                }));
+            }
+            lines
+        }
+        (FilesystemInstruction::WriteFile { path, .. }, FilesystemOutcome::WriteFile(_)) => {
+            vec![format!("wrote {}", path)]
+        }
+        (FilesystemInstruction::PatchFile { path, .. }, FilesystemOutcome::PatchFile(_)) => {
+            vec![format!("patched {}", path)]
+        }
+        (FilesystemInstruction::CreateDir { path, .. }, FilesystemOutcome::CreateDir) => {
+            vec![format!("created directory {}", path)]
+        }
+        (FilesystemInstruction::MovePath { from, to, .. }, FilesystemOutcome::MovePath(_)) => {
+            vec![format!("moved {} -> {}", from, to)]
+        }
+        (FilesystemInstruction::DeletePath { path, .. }, FilesystemOutcome::DeletePath(_)) => {
+            vec![format!("deleted {}", path)]
+        }
+        (FilesystemInstruction::Stat { path }, FilesystemOutcome::Stat(stat)) => {
+            vec![format!(
+                "stat {} :: {:?} :: {} bytes",
+                path,
+                stat.kind,
+                stat.size_bytes.unwrap_or(0)
+            )]
+        }
+        _ => vec![format!("{} :: completed", instruction_name(instruction))],
+    }
+}
+
+fn instruction_name(instruction: &FilesystemInstruction) -> &'static str {
+    match instruction {
+        FilesystemInstruction::ListDir { .. } => "list_dir",
+        FilesystemInstruction::Stat { .. } => "stat",
+        FilesystemInstruction::ReadFile { .. } => "read_file",
+        FilesystemInstruction::WriteFile { .. } => "write_file",
+        FilesystemInstruction::PatchFile { .. } => "patch_file",
+        FilesystemInstruction::CreateDir { .. } => "create_dir",
+        FilesystemInstruction::MovePath { .. } => "move_path",
+        FilesystemInstruction::DeletePath { .. } => "delete_path",
+        FilesystemInstruction::SearchText { .. } => "search_text",
     }
 }
 
@@ -252,10 +347,11 @@ fn build_failure_action(command: &str, cwd: &VirtualPath, kind: &str, message: S
             "microbash".to_string(),
             event.clone(),
         )),
-        AgentAction::UpdateWorkspace(WorkspaceDelta::RecordJob {
-            summary: format!("microbash {command}"),
+        AgentAction::UpdateWorkspace(WorkspaceDelta::RecordCli {
+            command: command.to_string(),
             state: "error".to_string(),
-            detail: event,
+            cwd: cwd.clone(),
+            transcript: vec![format!("error[{kind}]: {message}")],
         }),
     ])
 }

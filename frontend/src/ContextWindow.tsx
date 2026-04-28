@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { FileText, FolderOpen, Search, TerminalSquare, X, type LucideIcon } from "lucide-react";
+import { Command, FileText, FolderOpen, Search, TerminalSquare, X, type LucideIcon } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { SyncProvider } from "./SyncEngine";
@@ -7,7 +7,7 @@ import { useSync } from "./useSync";
 import { WebGLGrain } from "./components/WebGLGrain";
 import { closeAgentWorkspaceWindow, startAgentWorkspaceDrag } from "./platform";
 
-type WorkspaceTabId = "files" | "editor" | "search" | "jobs";
+type WorkspaceTabId = "files" | "editor" | "search" | "cli" | "jobs";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -26,11 +26,13 @@ function ContextWindowShell() {
 
   const fileTreeEntries = useMemo(() => Array.isArray(agentWorkspace?.file_tree.entries) ? agentWorkspace.file_tree.entries as Array<{ path?: string; name?: string; file_name?: string; kind?: string }> : [], [agentWorkspace]);
   const fileSearchMatches = useMemo(() => Array.isArray(agentWorkspace?.file_search.matches) ? agentWorkspace.file_search.matches as Array<{ path?: string; line_number?: number; line_text?: string }> : [], [agentWorkspace]);
+  const cliHistory = useMemo(() => Array.isArray(agentWorkspace?.cli?.history) ? agentWorkspace.cli.history : [], [agentWorkspace]);
   const jobHistory = useMemo(() => Array.isArray(agentWorkspace?.jobs.history) ? agentWorkspace.jobs.history as Array<{ summary?: string; state?: string }> : [], [agentWorkspace]);
   const tabs = useMemo(() => ([
     { id: "files", label: "Files", icon: FolderOpen },
     { id: "editor", label: "Editor", icon: FileText },
     { id: "search", label: "Search", icon: Search },
+    { id: "cli", label: "CLI", icon: Command },
     { id: "jobs", label: "Jobs", icon: TerminalSquare },
   ] as Array<{ id: WorkspaceTabId; label: string; icon: LucideIcon }>), []);
 
@@ -175,6 +177,24 @@ function ContextWindowShell() {
                         <div className="mt-1 truncate text-[12px] text-white/48">{match.line_text ?? ""}</div>
                       </div>
                     )) : <div className="text-[12px] text-white/35">No search results loaded.</div>}
+                  </div>
+                </div>
+              ) : null}
+
+              {workspaceTab === "cli" ? (
+                <div className="rounded-[14px] border border-white/[0.05] bg-white/[0.03] px-3 py-2">
+                  <div className="space-y-3">
+                    {cliHistory.length > 0 ? cliHistory.slice().reverse().map((record, index) => (
+                      <div key={`${record.command}-${index}`} className="rounded-[12px] border border-white/[0.04] bg-black/20 px-3 py-2">
+                        <div className="font-mono text-[12px] text-white/78">$ {record.command}</div>
+                        <div className="mt-1 text-[10px] uppercase tracking-[0.16em] text-white/24">{record.state} · {record.cwd}</div>
+                        <div className="mt-2 space-y-1 font-mono text-[11px] leading-5 text-white/56">
+                          {record.transcript.length > 0 ? record.transcript.slice(0, 64).map((line, lineIndex) => (
+                            <div key={`${record.command}-${index}-${lineIndex}`} className="truncate">{line || " "}</div>
+                          )) : <div>(no output)</div>}
+                        </div>
+                      </div>
+                    )) : <div className="text-[12px] text-white/35">No CLI transcript recorded.</div>}
                   </div>
                 </div>
               ) : null}

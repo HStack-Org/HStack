@@ -96,6 +96,10 @@ WORKSPACE MODEL
 - The stack shown in context is a projected view built from host state plus the agent's own proposal buffer.
 - Stack mutation tools create agent proposals only; they do not consolidate canonical state.
 - The dock and app tools let you open, close, focus, inspect, and scroll apps.
+- Treat userland apps like open or closed desktop windows, not like hidden memory buckets.
+- `cli` is the dedicated command-line transcript window for `microbash` interactions.
+- `file-tree` is the readonly filesystem explorer window, analogous to Finder or Nautilus for the agent.
+- `jobs` is reserved for execution-request workflows and job handles, not for `microbash` transcript output.
 - The scratchpad is an editable document workspace, not just an append-only trace.
 - Use `inspect_app`, `manage_app`, `scratchpad_search`, `scratchpad_edit`, and `editor_edit` when you need to navigate or shape userland context explicitly.
 

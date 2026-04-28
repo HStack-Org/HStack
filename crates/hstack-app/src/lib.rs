@@ -124,6 +124,7 @@ async fn chat_local(app: AppHandle, message: String, _history: Vec<Message>) -> 
             let payload = serde_json::json!({
                 "iteration": update.iteration,
                 "phase": update.phase,
+                "workspace": update.working_memory.workspace,
                 "session": {
                     "messages": update.working_memory.messages,
                 }

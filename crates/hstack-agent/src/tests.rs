@@ -6,7 +6,7 @@ mod tests {
     use crate::manager::{ContextManager, SimpleContextManager};
     use crate::control::AllowAllControl;
     use crate::provider::{LlmProvider, Message, Role};
-    use crate::tool::{compose_tools, CreateTicketTool, EditorEditTool, ExecutionRequestTool, FilesystemPatchTool, FollowUpTool, IdentityTool, InspectAppTool, LightComputeTool, ManageAppTool, MicrobashTool, ScratchThought, ScratchpadEditTool, ScratchpadSearchTool, SearchStack, Tool, WebSearchTool};
+    use crate::tool::{compose_tools, CreateTicketTool, EditorEditTool, ExecutionRequestTool, FilesystemPatchTool, FollowUpTool, IdentityTool, InspectAppTool, LightComputeTool, ManageAppTool, MicrobashTool, OpenAppTool, ScratchThought, ScratchpadEditTool, ScratchpadSearchTool, SearchStack, Tool, WebSearchTool};
     use crate::workspace::{compose_workspace_system_message, render_workspace_projection, short_term_messages, AppId, AppLifecycle, WorkspaceDelta};
     use crate::action::{AgentAction, WorkingMemoryDelta};
     use crate::error::Error;
@@ -1484,10 +1484,13 @@ mod tests {
         };
         apply_action_for_test(&mut memory, action).await;
 
-        assert_eq!(memory.workspace.dock.focused_app, AppId::FileTree);
+        assert_eq!(memory.workspace.dock.focused_app, AppId::Cli);
         assert_eq!(memory.workspace.file_tree.cwd.as_str(), "/");
         assert!(memory.workspace.file_tree.entries.iter().any(|entry| entry.name == "alpha.txt"));
-        assert!(!memory.workspace.jobs.history.is_empty());
+        assert_eq!(memory.workspace.jobs.history.len(), 0);
+        assert_eq!(memory.workspace.cli.history.len(), 1);
+        assert_eq!(memory.workspace.cli.history[0].command, "ls /");
+        assert!(memory.workspace.cli.history[0].transcript.iter().any(|line| line.contains("alpha.txt")));
 
         let _ = fs::remove_dir_all(sandbox_root);
     }
@@ -1519,10 +1522,13 @@ mod tests {
         };
         apply_action_for_test(&mut memory, cat_action).await;
 
-        assert_eq!(memory.workspace.dock.focused_app, AppId::Editor);
+        assert_eq!(memory.workspace.dock.focused_app, AppId::Cli);
         let buffer = memory.workspace.editor.buffer.as_ref().unwrap_or_else(|| panic!("expected editor buffer"));
         assert_eq!(buffer.path.as_str(), "/docs/readme.txt");
         assert!(buffer.lines.iter().any(|line| line == "hello"));
+        let cli_record = memory.workspace.cli.history.last().unwrap_or_else(|| panic!("expected cli history"));
+        assert_eq!(cli_record.command, "cat readme.txt");
+        assert!(cli_record.transcript.iter().any(|line| line == "hello"));
 
         let _ = fs::remove_dir_all(sandbox_root);
     }
@@ -1544,11 +1550,70 @@ mod tests {
         };
         apply_action_for_test(&mut memory, action).await;
 
-        assert_eq!(memory.workspace.dock.focused_app, AppId::FileSearch);
+        assert_eq!(memory.workspace.dock.focused_app, AppId::Cli);
         assert_eq!(memory.workspace.file_search.focused_query.as_deref(), Some("needle"));
         assert_eq!(memory.workspace.file_search.matches.len(), 1);
+        let cli_record = memory.workspace.cli.history.last().unwrap_or_else(|| panic!("expected cli history"));
+        assert_eq!(cli_record.command, "grep needle /");
+        assert!(cli_record.transcript.iter().any(|line| line.contains("needle here")));
 
         let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[tokio::test]
+    async fn test_manage_and_inspect_app_accept_cli_and_filesystem_ids() {
+        let world = InMemoryWorld { tickets: Vec::new() };
+        let memory = WorkingMemory::new();
+
+        let open = OpenAppTool;
+
+        let manage = ManageAppTool;
+        let inspect = InspectAppTool;
+
+        let action = match open.execute(serde_json::json!({
+            "app_id": "cli"
+        }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("open_app cli failed: {e}"),
+        };
+        match action {
+            AgentAction::UpdateWorkspace(WorkspaceDelta::OpenApp(AppId::Cli)) => {}
+            other => panic!("unexpected open_app cli action: {other:?}"),
+        }
+
+        let action = match manage.execute(serde_json::json!({
+            "action": "open",
+            "app_id": "file_tree"
+        }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("manage_app alias failed: {e}"),
+        };
+        match action {
+            AgentAction::UpdateWorkspace(WorkspaceDelta::OpenApp(AppId::FileTree)) => {}
+            other => panic!("unexpected manage_app alias action: {other:?}"),
+        }
+
+        let action = match inspect.execute(serde_json::json!({
+            "app_id": "file_search"
+        }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("inspect_app alias failed: {e}"),
+        };
+        match action {
+            AgentAction::UpdateWorkingMemory(_) => {}
+            other => panic!("unexpected inspect_app alias action: {other:?}"),
+        }
+
+        let action = match inspect.execute(serde_json::json!({
+            "app_id": "cli"
+        }), &world, &memory).await {
+            Ok(action) => action,
+            Err(e) => panic!("inspect_app cli failed: {e}"),
+        };
+        match action {
+            AgentAction::UpdateWorkingMemory(_) => {}
+            other => panic!("unexpected inspect_app cli action: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -2046,6 +2111,7 @@ mod tests {
                 .map(|value| value.contains("collect "))
                 .unwrap_or(false)
         }));
+        assert!(memory.workspace.cli.history.is_empty());
 
         match identity_action {
             AgentAction::Stop(answer) => {
@@ -2453,6 +2519,16 @@ mod tests {
             updated_at: chrono::Utc::now(),
         }];
 
+        let projection = render_workspace_projection(
+            &memory,
+            &tickets,
+        );
+        assert!(projection.contains("DOCK"));
+        assert!(projection.contains("SCRATCHPAD"));
+        assert!(projection.contains("workspace focus note"));
+        assert!(projection.contains("PROJECTED STACK"));
+        assert!(projection.contains("Visible projected task"));
+
         let system = compose_workspace_system_message(
             "BASE PROMPT",
             &memory,
@@ -2460,11 +2536,8 @@ mod tests {
             &hstack_core::settings::UserSettings::default(),
             &[],
         );
-        assert!(system.contains("DOCK"));
-        assert!(system.contains("SCRATCHPAD"));
-        assert!(system.contains("workspace focus note"));
-        assert!(system.contains("PROJECTED STACK"));
-        assert!(system.contains("Visible projected task"));
+        assert!(!system.contains("DOCK"));
+        assert!(!system.contains("PROJECTED STACK"));
     }
 
     #[tokio::test]
@@ -2487,11 +2560,16 @@ mod tests {
 
         let system_content = messages[0].content.as_deref().unwrap_or_default();
         assert!(!system_content.contains("single question"));
+        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[1].role, Role::User);
+        let projection_content = messages[1].content.as_deref().unwrap_or_default();
+        assert!(projection_content.contains("SHORT-TERM KERNEL"));
+        assert!(projection_content.contains("user: single question"));
 
         let short_term_occurrences = messages
             .iter()
             .filter_map(|message| message.content.as_deref())
-            .filter(|content| *content == "single question")
+            .filter(|content| content.contains("single question"))
             .count();
         assert_eq!(short_term_occurrences, 1);
     }
@@ -2568,6 +2646,11 @@ mod tests {
         let _ = memory.workspace.apply_delta(WorkspaceDelta::OpenApp(AppId::Compute));
         let _ = memory.workspace.materialize_allocation_plan();
 
+        let projection = render_workspace_projection(&memory, &[]);
+        assert!(projection.contains("pinned: [scratchpad, compute]"));
+        assert!(projection.contains("mounted:"));
+        assert!(!projection.contains("actions: open close focus pin unpin scroll inspect search edit"));
+
         let system = compose_workspace_system_message(
             "BASE PROMPT",
             &memory,
@@ -2575,9 +2658,7 @@ mod tests {
             &hstack_core::settings::UserSettings::default(),
             &[],
         );
-        assert!(system.contains("pinned: [scratchpad, compute]"));
-        assert!(system.contains("mounted:"));
-        assert!(!system.contains("actions: open close focus pin unpin scroll inspect search edit"));
+        assert_eq!(system, "BASE PROMPT");
     }
 
     #[tokio::test]
@@ -2615,6 +2696,8 @@ mod tests {
         assert!(prompt.contains("Do not assume optional tools exist unless they appear in the current turn's available tools."));
         assert!(prompt.contains("Do not use a local-stack tool to answer a world-knowledge question."));
         assert!(prompt.contains("Use `follow_up` only to record the needed clarification before the final `identity` reply."));
+        assert!(prompt.contains("`cli` is the dedicated command-line transcript window for `microbash` interactions."));
+        assert!(prompt.contains("`jobs` is reserved for execution-request workflows and job handles, not for `microbash` transcript output."));
     }
 
     #[tokio::test]

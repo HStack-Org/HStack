@@ -23,7 +23,7 @@ impl Tool for InspectAppTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "app_id": { "type": "string", "enum": ["scratchpad", "websearch", "stack-search", "compute", "file-tree", "editor", "file-search", "jobs"] }
+                "app_id": { "type": "string", "enum": ["scratchpad", "websearch", "stack-search", "stack_search", "compute", "cli", "file-tree", "file_tree", "editor", "file-search", "file_search", "jobs"] }
             },
             "required": ["app_id"]
         })
@@ -49,11 +49,12 @@ fn parse_app_id(value: Option<&Value>) -> Result<AppId, Error> {
     match value.and_then(Value::as_str) {
         Some("scratchpad") => Ok(AppId::Scratchpad),
         Some("websearch") => Ok(AppId::WebSearch),
-        Some("stack-search") => Ok(AppId::StackSearch),
+        Some("stack-search") | Some("stack_search") => Ok(AppId::StackSearch),
         Some("compute") => Ok(AppId::Compute),
-        Some("file-tree") => Ok(AppId::FileTree),
+        Some("cli") => Ok(AppId::Cli),
+        Some("file-tree") | Some("file_tree") => Ok(AppId::FileTree),
         Some("editor") => Ok(AppId::Editor),
-        Some("file-search") => Ok(AppId::FileSearch),
+        Some("file-search") | Some("file_search") => Ok(AppId::FileSearch),
         Some("jobs") => Ok(AppId::Jobs),
         _ => Err(Error::Provider("inspect_app requires a valid 'app_id'".to_string())),
     }

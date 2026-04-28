@@ -39,6 +39,15 @@ export interface AgentWorkspaceState {
     lifecycle: string;
     history: unknown[];
   };
+  cli: {
+    lifecycle: string;
+    history: Array<{
+      command: string;
+      state: string;
+      cwd: string;
+      transcript: string[];
+    }>;
+  };
 }
 
 export interface AgentFilesystemMountState {
@@ -70,6 +79,7 @@ export interface AgentSessionState {
 export interface AgentProgressState {
   iteration: number;
   phase: string;
+  workspace?: AgentWorkspaceState;
   session: AgentSessionState;
 }
 
@@ -280,6 +290,9 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
     void listen<AgentProgressState>(AGENT_PROGRESS_EVENT, (event) => {
       setAgentProgress(event.payload);
       setAgentSession(event.payload.session);
+      if (event.payload.workspace) {
+        setAgentWorkspace(event.payload.workspace);
+      }
     }).then((unlisten) => {
       removeProgressListener = unlisten;
     });

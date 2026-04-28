@@ -552,17 +552,148 @@ fn insert_tool_contract_message_for_refs(messages: &mut Vec<Message>, tools: &[&
         content.push_str("- available_tools: [");
         content.push_str(&tool_names.join(", "));
         content.push_str("]\n");
+        for tool in tools {
+            content.push_str("- tool ");
+            content.push_str(tool.name());
+            content.push_str(": ");
+            content.push_str(tool.description());
+            let parameter_summary = summarize_tool_parameters(tool.parameters());
+            if !parameter_summary.is_empty() {
+                content.push_str(" :: ");
+                content.push_str(&parameter_summary);
+            }
+            content.push('\n');
+        }
     }
     content.push_str("- Any other tool name is invalid and has no semantic effect.\n");
 
-    let tool_contract = Message {
+    // SPEC ANCHOR: keep a single leading system-role message. Adding a second
+    // system message after historical tool or workspace messages breaks the
+    // provider-visible ordering contract.
+    if let Some(first_message) = messages.first_mut() {
+        if matches!(first_message.role, Role::System) {
+            match first_message.content.as_mut() {
+                Some(existing) => {
+                    existing.push_str("\n\n");
+                    existing.push_str(&content);
+                }
+                None => first_message.content = Some(content),
+            }
+            return;
+        }
+    }
+
+    messages.insert(0, Message {
         role: Role::System,
         content: Some(content),
         tool_calls: None,
         tool_call_id: None,
         name: None,
+    });
+}
+
+fn summarize_tool_parameters(parameters: Value) -> String {
+    let Some(properties) = parameters.get("properties").and_then(Value::as_object) else {
+        return String::new();
     };
 
-    let insert_at = usize::from(!messages.is_empty());
-    messages.insert(insert_at, tool_contract);
+    let mut summaries = Vec::new();
+    for (name, spec) in properties {
+        if let Some(values) = spec.get("enum").and_then(Value::as_array) {
+            let rendered = values
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            if !rendered.is_empty() {
+                summaries.push(format!("{} ∈ [{}]", name, rendered.join(", ")));
+            }
+        }
+    }
+
+    summaries.join("; ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::insert_tool_contract_message_for_refs;
+    use crate::memory::{HStackWorld, WorkingMemory};
+    use crate::provider::{Message, Role};
+    use crate::tool::Tool;
+    use crate::{AgentAction, Error};
+    use async_trait::async_trait;
+    use serde_json::Value;
+
+    struct TestTool {
+        name: &'static str,
+        description: &'static str,
+        parameters: Value,
+    }
+
+    #[async_trait]
+    impl Tool for TestTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            self.description
+        }
+
+        fn parameters(&self) -> Value {
+            self.parameters.clone()
+        }
+
+        async fn execute(&self, _args: Value, _world: &dyn HStackWorld, _memory: &WorkingMemory) -> Result<AgentAction, Error> {
+            Err(Error::Invariant("test tool should not execute".to_string()))
+        }
+    }
+
+    #[test]
+    fn tool_contract_lists_descriptions_and_enum_hints() {
+        let manage = TestTool {
+            name: "manage_app",
+            description: "Controls app lifecycle.",
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["open", "close"] },
+                    "app_id": { "type": "string", "enum": ["file-tree", "editor"] }
+                }
+            }),
+        };
+        let microbash = TestTool {
+            name: "microbash",
+            description: "Runs constrained microbash commands against the configured sandboxed workspace.",
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" }
+                }
+            }),
+        };
+
+        let mut messages = vec![Message {
+            role: Role::System,
+            content: Some("BASE".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+        let tools: Vec<&dyn Tool> = vec![&manage, &microbash];
+
+        insert_tool_contract_message_for_refs(&mut messages, &tools, false);
+
+        assert_eq!(messages.len(), 1);
+
+        let contract = messages
+            .first()
+            .and_then(|message| message.content.as_deref())
+            .unwrap_or("");
+        assert!(contract.starts_with("BASE"));
+        assert!(contract.contains("available_tools: [manage_app, microbash]"));
+        assert!(contract.contains("tool manage_app: Controls app lifecycle."));
+        assert!(contract.contains("action ∈ [open, close]"));
+        assert!(contract.contains("app_id ∈ [file-tree, editor]"));
+        assert!(contract.contains("tool microbash: Runs constrained microbash commands against the configured sandboxed workspace."));
+    }
 }

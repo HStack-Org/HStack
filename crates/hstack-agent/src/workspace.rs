@@ -47,6 +47,7 @@ pub enum AppId {
     WebSearch,
     StackSearch,
     Compute,
+    Cli,
     FileTree,
     Editor,
     FileSearch,
@@ -60,6 +61,7 @@ impl AppId {
             AppId::WebSearch => "websearch",
             AppId::StackSearch => "stack-search",
             AppId::Compute => "compute",
+            AppId::Cli => "cli",
             AppId::FileTree => "file-tree",
             AppId::Editor => "editor",
             AppId::FileSearch => "file-search",
@@ -77,6 +79,7 @@ pub fn app_is_available(app_id: AppId) -> bool {
         AppId::Scratchpad
         | AppId::StackSearch
         | AppId::Compute
+        | AppId::Cli
         | AppId::FileTree
         | AppId::Editor
         | AppId::FileSearch
@@ -247,6 +250,33 @@ impl Default for ComputeApp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CliRecord {
+    pub command: String,
+    pub state: String,
+    pub cwd: VirtualPath,
+    pub transcript: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CliApp {
+    pub lifecycle: AppLifecycle,
+    pub pinned: bool,
+    pub viewport: TextViewport,
+    pub history: Vec<CliRecord>,
+}
+
+impl Default for CliApp {
+    fn default() -> Self {
+        Self {
+            lifecycle: AppLifecycle::InstalledClosed,
+            pinned: false,
+            viewport: TextViewport::new(0, 8),
+            history: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileTreeApp {
     pub lifecycle: AppLifecycle,
     pub pinned: bool,
@@ -388,6 +418,8 @@ pub struct WorkspaceState {
     pub web_search: SearchApp,
     pub stack_search: SearchApp,
     pub compute: ComputeApp,
+    #[serde(default)]
+    pub cli: CliApp,
     pub file_tree: FileTreeApp,
     pub editor: EditorApp,
     pub file_search: FilesystemSearchApp,
@@ -406,6 +438,7 @@ impl Default for WorkspaceState {
             web_search: SearchApp::new(AppId::WebSearch, SearchAppKind::Web),
             stack_search: SearchApp::new(AppId::StackSearch, SearchAppKind::Stack),
             compute: ComputeApp::default(),
+            cli: CliApp::default(),
             file_tree: FileTreeApp::default(),
             editor: EditorApp::default(),
             file_search: FilesystemSearchApp::default(),
@@ -431,6 +464,12 @@ pub enum WorkspaceDelta {
     RecordCompute {
         summary: String,
         payload: Value,
+    },
+    RecordCli {
+        command: String,
+        state: String,
+        cwd: VirtualPath,
+        transcript: Vec<String>,
     },
     PublishFilesystemTree {
         cwd: VirtualPath,
@@ -553,6 +592,28 @@ impl WorkspaceState {
                     "compute": {
                         "summary": summary,
                         "payload": payload,
+                    }
+                })
+            }
+            WorkspaceDelta::RecordCli {
+                command,
+                state,
+                cwd,
+                transcript,
+            } => {
+                self.focus_app(AppId::Cli);
+                self.cli.history.push(CliRecord {
+                    command: command.clone(),
+                    state: state.clone(),
+                    cwd: cwd.clone(),
+                    transcript: transcript.clone(),
+                });
+                serde_json::json!({
+                    "cli": {
+                        "command": command,
+                        "state": state,
+                        "cwd": cwd,
+                        "transcript": transcript,
                     }
                 })
             }
@@ -726,6 +787,7 @@ impl WorkspaceState {
         candidates.extend(self.candidates_for_search(&self.web_search));
         candidates.extend(self.candidates_for_search(&self.stack_search));
         candidates.extend(self.candidates_for_compute());
+        candidates.extend(self.candidates_for_cli());
         candidates.extend(self.candidates_for_file_tree());
         candidates.extend(self.candidates_for_editor());
         candidates.extend(self.candidates_for_filesystem_search());
@@ -771,6 +833,13 @@ impl WorkspaceState {
                 "pinned": self.compute.pinned,
                 "viewport": self.compute.viewport,
                 "visible": self.visible_compute_records(),
+            }),
+            AppId::Cli => serde_json::json!({
+                "app_id": app_id.label(),
+                "lifecycle": format!("{:?}", self.cli.lifecycle),
+                "pinned": self.cli.pinned,
+                "viewport": self.cli.viewport,
+                "visible": self.visible_cli_records(),
             }),
             AppId::FileTree => serde_json::json!({
                 "app_id": app_id.label(),
@@ -849,6 +918,11 @@ impl WorkspaceState {
         visible_lines(&lines, self.compute.viewport)
     }
 
+    pub fn visible_cli_records(&self) -> Vec<String> {
+        let lines = cli_lines(&self.cli);
+        visible_lines(&lines, self.cli.viewport)
+    }
+
     pub fn visible_file_tree_lines(&self) -> Vec<String> {
         let lines = file_tree_lines(&self.file_tree);
         visible_lines(&lines, self.file_tree.viewport)
@@ -884,6 +958,7 @@ impl WorkspaceState {
             self.render_dock_entry(AppId::WebSearch, self.web_search.lifecycle, self.web_search.pinned, mounted_apps.contains(&AppId::WebSearch)),
             self.render_dock_entry(AppId::StackSearch, self.stack_search.lifecycle, self.stack_search.pinned, mounted_apps.contains(&AppId::StackSearch)),
             self.render_dock_entry(AppId::Compute, self.compute.lifecycle, self.compute.pinned, mounted_apps.contains(&AppId::Compute)),
+            self.render_dock_entry(AppId::Cli, self.cli.lifecycle, self.cli.pinned, mounted_apps.contains(&AppId::Cli)),
             self.render_dock_entry(AppId::FileTree, self.file_tree.lifecycle, self.file_tree.pinned, mounted_apps.contains(&AppId::FileTree)),
             self.render_dock_entry(AppId::Editor, self.editor.lifecycle, self.editor.pinned, mounted_apps.contains(&AppId::Editor)),
             self.render_dock_entry(AppId::FileSearch, self.file_search.lifecycle, self.file_search.pinned, mounted_apps.contains(&AppId::FileSearch)),
@@ -975,6 +1050,7 @@ impl WorkspaceState {
             AppId::WebSearch => self.web_search.lifecycle,
             AppId::StackSearch => self.stack_search.lifecycle,
             AppId::Compute => self.compute.lifecycle,
+            AppId::Cli => self.cli.lifecycle,
             AppId::FileTree => self.file_tree.lifecycle,
             AppId::Editor => self.editor.lifecycle,
             AppId::FileSearch => self.file_search.lifecycle,
@@ -988,6 +1064,7 @@ impl WorkspaceState {
             AppId::WebSearch => self.web_search.pinned,
             AppId::StackSearch => self.stack_search.pinned,
             AppId::Compute => self.compute.pinned,
+            AppId::Cli => self.cli.pinned,
             AppId::FileTree => self.file_tree.pinned,
             AppId::Editor => self.editor.pinned,
             AppId::FileSearch => self.file_search.pinned,
@@ -1047,6 +1124,12 @@ impl WorkspaceState {
             &self.dock.mounted_apps,
         );
         sync_app_mount_state(
+            &mut self.cli.lifecycle,
+            AppId::Cli,
+            self.dock.focused_app,
+            &self.dock.mounted_apps,
+        );
+        sync_app_mount_state(
             &mut self.file_tree.lifecycle,
             AppId::FileTree,
             self.dock.focused_app,
@@ -1078,6 +1161,7 @@ impl WorkspaceState {
             AppId::WebSearch => self.web_search.lifecycle = AppLifecycle::OpenUnmounted,
             AppId::StackSearch => self.stack_search.lifecycle = AppLifecycle::OpenUnmounted,
             AppId::Compute => self.compute.lifecycle = AppLifecycle::OpenUnmounted,
+            AppId::Cli => self.cli.lifecycle = AppLifecycle::OpenUnmounted,
             AppId::FileTree => self.file_tree.lifecycle = AppLifecycle::OpenUnmounted,
             AppId::Editor => self.editor.lifecycle = AppLifecycle::OpenUnmounted,
             AppId::FileSearch => self.file_search.lifecycle = AppLifecycle::OpenUnmounted,
@@ -1095,6 +1179,7 @@ impl WorkspaceState {
             AppId::WebSearch => self.web_search.lifecycle = AppLifecycle::InstalledClosed,
             AppId::StackSearch => self.stack_search.lifecycle = AppLifecycle::InstalledClosed,
             AppId::Compute => self.compute.lifecycle = AppLifecycle::InstalledClosed,
+            AppId::Cli => self.cli.lifecycle = AppLifecycle::InstalledClosed,
             AppId::FileTree => self.file_tree.lifecycle = AppLifecycle::InstalledClosed,
             AppId::Editor => self.editor.lifecycle = AppLifecycle::InstalledClosed,
             AppId::FileSearch => self.file_search.lifecycle = AppLifecycle::InstalledClosed,
@@ -1114,6 +1199,7 @@ impl WorkspaceState {
             AppId::WebSearch => self.web_search.lifecycle = AppLifecycle::OpenMountedFocused,
             AppId::StackSearch => self.stack_search.lifecycle = AppLifecycle::OpenMountedFocused,
             AppId::Compute => self.compute.lifecycle = AppLifecycle::OpenMountedFocused,
+            AppId::Cli => self.cli.lifecycle = AppLifecycle::OpenMountedFocused,
             AppId::FileTree => self.file_tree.lifecycle = AppLifecycle::OpenMountedFocused,
             AppId::Editor => self.editor.lifecycle = AppLifecycle::OpenMountedFocused,
             AppId::FileSearch => self.file_search.lifecycle = AppLifecycle::OpenMountedFocused,
@@ -1127,6 +1213,7 @@ impl WorkspaceState {
             AppId::WebSearch => self.web_search.pinned = pinned,
             AppId::StackSearch => self.stack_search.pinned = pinned,
             AppId::Compute => self.compute.pinned = pinned,
+            AppId::Cli => self.cli.pinned = pinned,
             AppId::FileTree => self.file_tree.pinned = pinned,
             AppId::Editor => self.editor.pinned = pinned,
             AppId::FileSearch => self.file_search.pinned = pinned,
@@ -1152,6 +1239,10 @@ impl WorkspaceState {
                 let total = self.compute.history.len().max(1);
                 self.compute.viewport = scroll_viewport(self.compute.viewport, delta, total);
             }
+            AppId::Cli => {
+                let total = cli_lines(&self.cli).len().max(1);
+                self.cli.viewport = scroll_viewport(self.cli.viewport, delta, total);
+            }
             AppId::FileTree => {
                 let total = file_tree_lines(&self.file_tree).len().max(1);
                 self.file_tree.viewport = scroll_viewport(self.file_tree.viewport, delta, total);
@@ -1176,6 +1267,7 @@ impl WorkspaceState {
         self.web_search.lifecycle = demote_focus(self.web_search.lifecycle);
         self.stack_search.lifecycle = demote_focus(self.stack_search.lifecycle);
         self.compute.lifecycle = demote_focus(self.compute.lifecycle);
+        self.cli.lifecycle = demote_focus(self.cli.lifecycle);
         self.file_tree.lifecycle = demote_focus(self.file_tree.lifecycle);
         self.editor.lifecycle = demote_focus(self.editor.lifecycle);
         self.file_search.lifecycle = demote_focus(self.file_search.lifecycle);
@@ -1253,6 +1345,23 @@ impl WorkspaceState {
         )
     }
 
+    fn candidates_for_cli(&self) -> Vec<ViewportCandidate> {
+        if !self.cli.lifecycle.is_open() {
+            return Vec::new();
+        }
+
+        let lines = cli_lines(&self.cli);
+        build_text_candidates(
+            AppId::Cli,
+            self.cli.lifecycle,
+            self.cli.pinned,
+            &lines,
+            self.cli.viewport,
+            "CLI",
+            priority_class(self.dock.focused_app, AppId::Cli),
+        )
+    }
+
     fn candidates_for_file_tree(&self) -> Vec<ViewportCandidate> {
         if !self.file_tree.lifecycle.is_open() {
             return Vec::new();
@@ -1326,10 +1435,14 @@ impl WorkspaceState {
     }
 }
 
+// SPEC ANCHOR: docs/agent-workspace-viewport-spec.md and
+// docs/agent-harness-invariants.md require a fixed decomposition of provider
+// context. The leading system message carries only the role/base prompt. The
+// visible workspace projection is mounted separately.
 pub fn compose_workspace_system_message(
     base_prompt: &str,
     memory: &crate::memory::WorkingMemory,
-    tickets: &[Ticket],
+    _tickets: &[Ticket],
     settings: &UserSettings,
     pending_actions: &[SyncAction],
 ) -> String {
@@ -1344,7 +1457,7 @@ pub fn compose_workspace_system_message(
     let saved_locations_str =
         hstack_core::location_utils::format_saved_locations_for_prompt(&settings.saved_locations);
 
-    let mut content = base_prompt
+    let content = base_prompt
         .replace("{recent_actions_str}", &recent_actions_str)
         .replace("{local_time}", &local_time)
         .replace("{local_date}", &local_date)
@@ -1352,16 +1465,7 @@ pub fn compose_workspace_system_message(
         .replace("{offset}", &offset)
         .replace("{saved_locations_str}", &saved_locations_str);
 
-    content.push_str("\n\n");
-    content.push_str(&render_workspace_regions(memory, tickets));
-
-    clamp_text_to_budget(
-        &content,
-        memory.workspace.budget.prompt_budget
-            + memory.workspace.budget.dock_budget
-            + memory.workspace.budget.near_event_budget
-            + memory.workspace.budget.app_budget,
-    )
+    clamp_text_to_budget(&content, memory.workspace.budget.prompt_budget)
 }
 
 fn render_recent_actions(pending_actions: &[SyncAction]) -> String {
@@ -1478,6 +1582,24 @@ pub fn render_workspace_projection(memory: &crate::memory::WorkingMemory, ticket
     content
 }
 
+// SPEC ANCHOR: docs/agent-workspace-viewport-spec.md defines the mounted
+// provider-visible projection as the bounded union of the short-term kernel,
+// dock, near-event region, and mounted app regions. Keep this separate from
+// the leading system prompt.
+pub fn compose_workspace_projection_message(
+    memory: &crate::memory::WorkingMemory,
+    tickets: &[Ticket],
+) -> String {
+    let projection = render_workspace_projection(memory, tickets);
+    clamp_text_to_budget(
+        &projection,
+        memory.workspace.budget.short_term_budget
+            + memory.workspace.budget.dock_budget
+            + memory.workspace.budget.near_event_budget
+            + memory.workspace.budget.app_budget,
+    )
+}
+
 pub fn short_term_messages(memory: &crate::memory::WorkingMemory) -> Vec<Message> {
     memory.workspace.render_short_term_messages(&memory.messages)
 }
@@ -1550,6 +1672,10 @@ pub fn workspace_runtime_snapshot(memory: &crate::memory::WorkingMemory) -> Valu
             "compute": {
                 "lifecycle": format!("{:?}", memory.workspace.compute.lifecycle),
                 "history": memory.workspace.compute.history.len(),
+            },
+            "cli": {
+                "lifecycle": format!("{:?}", memory.workspace.cli.lifecycle),
+                "history": memory.workspace.cli.history.len(),
             },
             "file_tree": {
                 "lifecycle": format!("{:?}", memory.workspace.file_tree.lifecycle),
@@ -1748,17 +1874,32 @@ fn visible_lines(lines: &[String], viewport: TextViewport) -> Vec<String> {
     lines[clamped.start_line..end].to_vec()
 }
 
-fn all_app_ids() -> [AppId; 8] {
+fn all_app_ids() -> [AppId; 9] {
     [
         AppId::Scratchpad,
         AppId::WebSearch,
         AppId::StackSearch,
         AppId::Compute,
+        AppId::Cli,
         AppId::FileTree,
         AppId::Editor,
         AppId::FileSearch,
         AppId::Jobs,
     ]
+}
+
+fn cli_lines(app: &CliApp) -> Vec<String> {
+    let mut lines = Vec::new();
+    for record in &app.history {
+        lines.push(format!("$ {}", record.command));
+        lines.push(format!("state: {} :: cwd: {}", record.state, record.cwd));
+        if record.transcript.is_empty() {
+            lines.push("(no output)".to_string());
+        } else {
+            lines.extend(record.transcript.iter().cloned());
+        }
+    }
+    lines
 }
 
 fn file_tree_lines(app: &FileTreeApp) -> Vec<String> {
