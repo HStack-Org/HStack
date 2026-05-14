@@ -6,7 +6,7 @@ rust-version.workspace = true
 license = "GPL-3.0-only"
 
 [dependencies]
-hstack-core = { path = "../hstack-core" }
+hstack-core = { git = "https://github.com/HStack-Org/humanstack-agent.git" }
 
 tokio = { version = "1.0", features = ["full"] }
 axum = { version = "0.7", features = ["ws", "macros"] }

@@ -827,7 +827,7 @@ fn render_app_windows(
         }
     };
 
-    for ((app_id, content), app_rect) in apps.iter().zip(rects.into_iter()) {
+    for ((app_id, content), app_rect) in apps.iter().zip(rects) {
         let border = if *app_id == focused_app {
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         } else {
