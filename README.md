@@ -168,7 +168,7 @@ HStack is organized as a shared-core, local-first system.
 
 | Component | Tech | Role |
 | --- | --- | --- |
-| `hstack-core` | Rust | Shared business logic, contracts, provider integrations, sync projection |
+| `hstack-core` | Rust | Shared business logic, contracts, provider integrations, sync projection *(from [`humanstack-agent`](https://github.com/HStack-Org/humanstack-agent))* |
 | `hstack-app` | Tauri + Rust | Native shell, secure storage, sync transport, local persistence |
 | `frontend` | React + Vite | Visual stack, onboarding, chat UI, settings, mobile/desktop rendering |
 | `hstack-server-lite` | Rust + Axum | Public lightweight auth and ticket backend |
@@ -218,6 +218,32 @@ The first run compiles the Rust side and can take a while. Iteration after that 
 
 ```bash
 npm run reset:welcome
+```
+
+## Verification
+
+Rust validation:
+
+```bash
+cargo clippy -p hstack-cli --all-targets -- -D warnings
+cargo test -p hstack-cli
+```
+
+The `hstack-core` and `hstack-agent` crates now live in the [`humanstack-agent`](https://github.com/HStack-Org/humanstack-agent) repository. Their validation commands should be run from that repo:
+
+```bash
+cd ../humanstack-agent
+cargo clippy -p hstack-core -p hstack-agent --all-targets -- -D warnings
+cargo test -p hstack-core -p hstack-agent
+```
+
+Formal harness proofs with Kani:
+
+```bash
+cd ../humanstack-agent
+cargo install --locked kani-verifier
+cargo kani setup
+cargo kani -p hstack-agent --lib
 ```
 
 That helper removes the derived app settings file without hardcoding a machine-specific path.
@@ -284,13 +310,14 @@ This is what lets HStack turn one messy sentence into multiple concrete state ch
 HStack/
 ├── crates/
 │   ├── hstack-app/          # Tauri shell and native commands
-│   ├── hstack-core/         # Shared contracts and logic
 │   └── hstack-server-lite/  # Public minimal backend
 ├── frontend/                # React/Vite UI rendered inside Tauri
 ├── docs/                    # Build, licensing, and boundary docs
 ├── scripts/                 # Development helpers
 └── tests/                   # Repo-level tests
 ```
+
+The `hstack-core` and `hstack-agent` crates live in the separate [`humanstack-agent`](https://github.com/HStack-Org/humanstack-agent) repository and are consumed as git dependencies.
 
 ## Product Direction
 
@@ -318,7 +345,7 @@ The end goal is not a prettier board. It is a system that removes planning frict
 This public repository uses a split-license model:
 
 - Product code is licensed under GPL-3.0-only.
-- `crates/hstack-core` is licensed under MPL-2.0.
+- `hstack-core` (in the [`humanstack-agent`](https://github.com/HStack-Org/humanstack-agent) repository) is licensed under MPL-2.0.
 
 That matches the project boundary:
 

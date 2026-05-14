@@ -2,7 +2,9 @@
 resolver = "3"
 members = [
     "crates/hstack-app",
-    "crates/hstack-core",
     "crates/hstack-server-lite",
-    "crates/hstack-agent"
+    "crates/hstack-cli"
 ]
+
+[workspace.package]
+rust-version = "1.95"

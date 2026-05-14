@@ -20,7 +20,7 @@ The goal is a clean architecture where the open version remains real and usable,
 
 ### hstack-core
 
-`hstack-core` is the shared contract and utility layer.
+`hstack-core` is the shared contract and utility layer. It now lives in the [`humanstack-agent`](https://github.com/HStack-Org/humanstack-agent) repository alongside `hstack-agent`.
 
 It should contain:
 

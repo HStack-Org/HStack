@@ -3,7 +3,7 @@
 This roadmap tracks work that belongs in the public repository:
 
 - the open product surface
-- `hstack-core` as the shared contract and utility layer
+- `hstack-core` and `hstack-agent` from the [`humanstack-agent`](https://github.com/HStack-Org/humanstack-agent) repository as the shared contract and agent layers
 - the public desktop app and lite server
 
 Private backend work is intentionally tracked separately in the private repository roadmap.
@@ -12,7 +12,7 @@ Private backend work is intentionally tracked separately in the private reposito
 
 This roadmap includes:
 
-- shared domain and contract work that lives in `hstack-core`
+- shared domain and contract work that lives in `hstack-core` (in the `humanstack-agent` repo)
 - public app experience and rendering work
 - lite-server behavior that keeps the open product self-contained
 

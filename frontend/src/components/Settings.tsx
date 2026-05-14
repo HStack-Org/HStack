@@ -3,7 +3,19 @@ import { invoke } from "@tauri-apps/api/core";
 import { Key, X } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { WebGLGrain } from "./WebGLGrain";
-import { authenticateRemote, clearRemoteSession, formatRemoteUserName, saveRemoteSession, type RemoteAuthMode, resolveAuthBaseUrl } from "../syncAuth";
+import {
+    REMOTE_GOOGLE_PROVIDER,
+    REMOTE_OAUTH_REDIRECT_EVENT,
+    authenticateRemote,
+    clearRemoteSession,
+    completeRemoteOAuth,
+    formatRemoteUserName,
+    parseRemoteOAuthRedirectUrl,
+    saveRemoteSession,
+    startGoogleRemoteOAuth,
+    type RemoteAuthMode,
+    resolveAuthBaseUrl,
+} from "../syncAuth";
 import { buildApiUrl, normalizeSyncBaseUrl, notifySyncConfigUpdated, resolveRemoteSyncConfig, type SyncSessionInfo } from "../syncConfig";
 import { useI18n } from "../i18n";
 import { LocaleSection, HostingSyncSection, ProviderModal, ProvidersSection, SavedLocationsSection, VoiceSection } from "./settings/sections";
@@ -42,12 +54,96 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
         apiKey: "",
         model_name: OPENAI_DEFAULT_MODEL
     });
+    const remoteBaseUrl = settings ? resolveAuthBaseUrl(settings.sync_mode, settings.custom_server_url) : null;
+    const hasRemoteMode = settings?.sync_mode === 'CloudOfficial' || settings?.sync_mode === 'CloudCustom';
+    const hasRemoteSession = Boolean(syncSession?.token && syncSession.user_id);
 
     useEffect(() => {
         if (isOpen) {
             void loadSettings();
         }
     }, [isOpen]);
+
+    useEffect(() => {
+        if (!isOpen || !settings || !hasRemoteMode) {
+            return;
+        }
+
+        const handleOAuthRedirect = async (event: Event) => {
+            const urls = (event as CustomEvent<string[]>).detail || [];
+            const baseUrl = resolveAuthBaseUrl(settings.sync_mode, settings.custom_server_url);
+            if (!baseUrl) {
+                return;
+            }
+
+            const redirect = urls
+                .map((url) => parseRemoteOAuthRedirectUrl(url))
+                .find((value) => value?.provider === REMOTE_GOOGLE_PROVIDER);
+
+            if (!redirect) {
+                return;
+            }
+
+            if (redirect.error) {
+                setSyncError(redirect.errorDescription || redirect.error);
+                setSyncPending(false);
+                return;
+            }
+
+            if (!redirect.code) {
+                setSyncError(t('googleAuthMissingCode'));
+                setSyncPending(false);
+                return;
+            }
+
+            try {
+                setSyncPending(true);
+                setSyncError(null);
+
+                const authResult = await completeRemoteOAuth(baseUrl, redirect.code);
+                await saveRemoteSession(authResult);
+
+                const normalizedCustomUrl = settings.sync_mode === 'CloudCustom'
+                    ? normalizeSyncBaseUrl(settings.custom_server_url)
+                    : settings.custom_server_url;
+                const userName = formatRemoteUserName(authResult.user);
+                const updatedSettings = {
+                    ...settings,
+                    custom_server_url: normalizedCustomUrl,
+                    sync_user_id: authResult.user.id,
+                    sync_user_name: userName,
+                };
+
+                if (settings.sync_mode === 'CloudCustom' && normalizedCustomUrl !== settings.custom_server_url) {
+                    await persistSettings(updatedSettings);
+                } else {
+                    setSettings(updatedSettings);
+                }
+
+                setSyncSession({
+                    user_id: authResult.user.id,
+                    user_name: userName,
+                    token: authResult.token,
+                });
+                setSyncLoginEmail('');
+                setSyncFirstName('');
+                setSyncLastName('');
+                setSyncEmail('');
+                setSyncPassword('');
+                notifySyncConfigUpdated();
+            } catch (error) {
+                console.error('Failed to complete sync Google OAuth:', error);
+                setSyncError(error instanceof Error ? error.message : t('remoteAuthFailed'));
+            } finally {
+                setSyncPending(false);
+            }
+        };
+
+        window.addEventListener(REMOTE_OAUTH_REDIRECT_EVENT, handleOAuthRedirect as EventListener);
+        return () => {
+            window.removeEventListener(REMOTE_OAUTH_REDIRECT_EVENT, handleOAuthRedirect as EventListener);
+        };
+    }, [hasRemoteMode, isOpen, settings, t]);
 
     const refreshVoiceCapability = async (loadedSettings: UserSettings, loadedSession: SyncSessionInfo) => {
         const remoteConfig = resolveRemoteSyncConfig(loadedSettings, loadedSession);
@@ -427,6 +523,41 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
         }
     };
 
+    const handleGoogleRemoteAuth = async () => {
+        if (!settings || syncPending) return;
+
+        try {
+            setSyncPending(true);
+            setSyncError(null);
+
+            const baseUrl = resolveAuthBaseUrl(settings.sync_mode, settings.custom_server_url);
+
+            if (!baseUrl) {
+                throw new Error(
+                    settings.sync_mode === 'CloudOfficial'
+                        ? t('officialCloudUnavailable')
+                        : t('enterValidServerUrl')
+                );
+            }
+
+            if (settings.sync_mode === 'CloudCustom') {
+                const normalizedCustomUrl = normalizeSyncBaseUrl(settings.custom_server_url);
+                if (normalizedCustomUrl !== settings.custom_server_url) {
+                    await persistSettings({
+                        ...settings,
+                        custom_server_url: normalizedCustomUrl,
+                    });
+                }
+            }
+
+            await startGoogleRemoteOAuth(baseUrl);
+        } catch (err) {
+            console.error('Failed to start sync Google OAuth:', err);
+            setSyncError(err instanceof Error ? err.message : t('remoteAuthFailed'));
+            setSyncPending(false);
+        }
+    };
+
     const handleVoiceModeChange = async (mode: UserSettings['voice']['mode']) => {
         if (!settings) return;
         const updated = {
@@ -474,10 +605,6 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
             console.error('Failed to clear voice API key:', error);
         }
     };
-
-    const remoteBaseUrl = settings ? resolveAuthBaseUrl(settings.sync_mode, settings.custom_server_url) : null;
-    const hasRemoteMode = settings?.sync_mode === 'CloudOfficial' || settings?.sync_mode === 'CloudCustom';
-    const hasRemoteSession = Boolean(syncSession?.token && syncSession.user_id);
 
     const isGeminiProvider = newProvider.kind === 'Gemini';
     const geminiModelOptions = (() => {
@@ -648,6 +775,7 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                 onSyncEmailChange={setSyncEmail}
                                 onSyncPasswordChange={setSyncPassword}
                                 onRemoteAuth={handleRemoteAuth}
+                                onRemoteGoogleAuth={handleGoogleRemoteAuth}
                                 onSignOut={handleSignOut}
                             />
 

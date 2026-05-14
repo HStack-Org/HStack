@@ -723,3 +723,54 @@ export function groupTickets(tickets: TicketModel[]) {
     unplanned: grouped.unplanned,
   };
 }
+
+export interface SyncAction {
+  type: "CREATE" | "UPDATE" | "DELETE";
+  entity_id: string;
+  entity_type: string;
+  payload?: any;
+  status?: string;
+}
+
+export function projectTickets(baseTickets: TicketModel[], actions: SyncAction[]): TicketModel[] {
+  let projected = [...baseTickets];
+  
+  for (const action of actions) {
+    switch (action.type) {
+      case "CREATE": {
+        // Only add if not already there
+        if (!projected.find(t => t.id === action.entity_id)) {
+          projected.push({
+            id: action.entity_id,
+            type: action.entity_type as any,
+            status: (action.status as any) || "idle",
+            title: action.payload?.title || "Untitled",
+            payload: action.payload || {},
+            updated_at: new Date().toISOString(),
+          });
+        }
+        break;
+      }
+      case "UPDATE": {
+        projected = projected.map(t => {
+          if (t.id === action.entity_id) {
+            return {
+              ...t,
+              status: (action.status as any) || t.status,
+              payload: { ...t.payload, ...action.payload },
+              updated_at: new Date().toISOString(),
+            };
+          }
+          return t;
+        });
+        break;
+      }
+      case "DELETE": {
+        projected = projected.filter(t => t.id !== action.entity_id);
+        break;
+      }
+    }
+  }
+  
+  return projected;
+}

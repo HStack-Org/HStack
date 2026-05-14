@@ -5,7 +5,9 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:event:default",
     "opener:default",
+    "deep-link:default",
     "core:window:default",
     "core:window:allow-minimize",
     "core:window:allow-set-size",

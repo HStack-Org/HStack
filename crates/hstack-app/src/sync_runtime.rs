@@ -380,7 +380,7 @@ async fn sync_remote_state(app: &AppHandle, config: &RemoteSyncConfig) -> Result
         let config_clone = config.clone();
         tokio::spawn(async move {
             if let Err(e) = refresh_remote_commutes_if_needed(&config_clone, commute_refresh_ids).await {
-                eprintln!("--- Background commute refresh failed: {} ---", e);
+                eprintln!("--- Background commute refresh failed: {e} ---");
             } else {
                 println!("--- Background commute refresh success ---");
             }
@@ -402,7 +402,7 @@ async fn send_hello(
     });
 
     socket
-        .send(Message::Text(hello.to_string().into()))
+        .send(Message::Text(hello.to_string()))
         .await
         .map_err(|error| format!("failed to send sync HELLO: {error}"))
 }
@@ -463,7 +463,7 @@ async fn flush_pending_actions(
             match pending_action_to_input(action) {
                 Ok(input) => Some(input),
                 Err(error) => {
-                    eprintln!("--- skipping malformed pending action: {} ---", error);
+                    eprintln!("--- skipping malformed pending action: {error} ---");
                     None
                 }
             }
@@ -483,7 +483,7 @@ async fn flush_pending_actions(
         .map_err(|error| format!("failed to serialize sync actions: {error}"))?;
 
     socket
-        .send(Message::Text(payload.into()))
+        .send(Message::Text(payload))
         .await
         .map_err(|error| format!("failed to send sync actions: {error}"))
 }
@@ -681,7 +681,7 @@ async fn run_sync_runtime(
                                     break;
                                 }
                                 Some(Ok(msg)) => {
-                                    println!("--- Received raw WebSocket message: {:?} ---", msg);
+                                    println!("--- Received raw WebSocket message: {msg:?} ---");
                                     if let Message::Text(text) = msg {
                                         let parsed: Value = match serde_json::from_str(&text) {
                                             Ok(value) => value,
@@ -720,7 +720,7 @@ async fn run_sync_runtime(
                                                             },
                                                         );
                                                         if let Err(error) = flush_pending_actions(&app, &mut socket).await {
-                                                            eprintln!("--- flush_pending_actions failed after ACK/IN_SYNC: {} ---", error);
+                                                            eprintln!("--- flush_pending_actions failed after ACK/IN_SYNC: {error} ---");
                                                             break;
                                                         }
                                                     }
@@ -745,7 +745,7 @@ async fn run_sync_runtime(
                                                             },
                                                         );
                                                         if let Err(error) = flush_pending_actions(&app, &mut socket).await {
-                                                            eprintln!("--- flush_pending_actions failed after OUT_OF_SYNC: {} ---", error);
+                                                            eprintln!("--- flush_pending_actions failed after OUT_OF_SYNC: {error} ---");
                                                             break;
                                                         }
                                                     }
@@ -765,7 +765,7 @@ async fn run_sync_runtime(
                                                 }
                                             }
                                             "SYNC_ACK" => {
-                                                println!("--- Received SYNC_ACK payload raw: {:?} ---", parsed);
+                                                println!("--- Received SYNC_ACK payload raw: {parsed:?} ---");
                                                 match serde_json::from_value::<SyncAck>(parsed.clone()) {
                                                     Ok(ack) => {
                                                         println!("--- SYNC_ACK successfully parsed containing {} ack_action_ids ---", ack.ack_action_ids.len());
@@ -781,7 +781,7 @@ async fn run_sync_runtime(
                                                             },
                                                         );
                                                         if let Err(e) = remove_acked_pending_actions(&app, &ack.ack_action_ids) {
-                                                            eprintln!("--- Failed to remove acked pending actions: {} ---", e);
+                                                            eprintln!("--- Failed to remove acked pending actions: {e} ---");
                                                         }
                                                         match sync_remote_state(&app, &config).await {
                                                             Ok(()) => {}
@@ -801,7 +801,7 @@ async fn run_sync_runtime(
                                                         }
                                                     }
                                                     Err(e) => {
-                                                        eprintln!("--- Failed to deserialize SYNC_ACK: {:?} ---", e);
+                                                        eprintln!("--- Failed to deserialize SYNC_ACK: {e:?} ---");
                                                     }
                                                 }
                                             }
@@ -861,7 +861,7 @@ async fn run_sync_runtime(
                 }
             }
             Ok(Err(error)) => {
-                println!("--- WebSocket connection failed: {} ---", error);
+                println!("--- WebSocket connection failed: {error} ---");
                 update_status(
                     &app,
                     &runtime_state,
@@ -992,7 +992,7 @@ pub async fn queue_sync_action(
     )
     .await?;
     if let Err(e) = trigger_flush(&app) {
-        eprintln!("Failed to trigger sync flush: {}", e);
+        eprintln!("Failed to trigger sync flush: {e}");
     }
 
     load_tickets_state(app).await

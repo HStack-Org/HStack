@@ -10,6 +10,79 @@ import {
   type UserSettingsShape,
 } from './syncConfig';
 
+export interface AgentWorkspaceState {
+  dock: {
+    focused_app: string;
+    mounted_apps: string[];
+  };
+  filesystem_cwd: string;
+  file_tree: {
+    lifecycle: string;
+    cwd: string;
+    entries: unknown[];
+  };
+  editor: {
+    lifecycle: string;
+    cwd: string;
+    buffer: {
+      path: string;
+      lines: string[];
+    } | null;
+  };
+  file_search: {
+    lifecycle: string;
+    focused_query: string | null;
+    scope_root: string;
+    matches: unknown[];
+  };
+  jobs: {
+    lifecycle: string;
+    history: unknown[];
+  };
+  cli: {
+    lifecycle: string;
+    history: Array<{
+      command: string;
+      state: string;
+      cwd: string;
+      transcript: string[];
+    }>;
+  };
+}
+
+export interface AgentFilesystemMountState {
+  host_path: string | null;
+  folder_picker_supported: boolean;
+}
+
+export interface AgentToolCall {
+  id: string;
+  type: string;
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export interface AgentSessionMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content?: string | null;
+  tool_calls?: AgentToolCall[] | null;
+  tool_call_id?: string | null;
+  name?: string | null;
+}
+
+export interface AgentSessionState {
+  messages: AgentSessionMessage[];
+}
+
+export interface AgentProgressState {
+  iteration: number;
+  phase: string;
+  workspace?: AgentWorkspaceState;
+  session: AgentSessionState;
+}
+
 export type TicketType = 'HABIT' | 'EVENT' | 'TASK' | 'COMMUTE' | 'COUNTDOWN';
 export type TicketStatus = 'idle' | 'in_focus' | 'completed' | 'expired';
 
@@ -31,11 +104,20 @@ interface SyncContextType {
   isConnected: boolean;
   hasRemoteSession: boolean;
   connectionPhase: string;
+  agentWorkspace: AgentWorkspaceState | null;
+  agentFilesystemMount: AgentFilesystemMountState | null;
+  agentSession: AgentSessionState | null;
+  agentProgress: AgentProgressState | null;
   createTicket: (type: TicketType, payload: any, status?: TicketStatus) => Promise<string>;
   updateTicket: (id: string, payload: any) => Promise<void>;
   updateTicketStatus: (id: string, status: TicketStatus) => Promise<void>;
   deleteTicket: (id: string) => Promise<void>;
   syncNow: () => Promise<void>;
+  proposedActions: any[];
+  acceptProposals: () => Promise<void>;
+  rejectProposals: () => Promise<void>;
+  pickAgentFilesystemMount: () => Promise<void>;
+  clearAgentFilesystemMount: () => Promise<void>;
 }
 
 interface SyncSettings extends UserSettingsShape {
@@ -61,6 +143,9 @@ interface QueueSyncActionRequest {
 
 const SYNC_STATUS_EVENT = 'hstack:sync-status';
 const SYNC_TICKETS_CHANGED_EVENT = 'hstack:sync-tickets-changed';
+const AGENT_SESSION_SYNC_EVENT = 'AGENT_SESSION_SYNC';
+const AGENT_PROGRESS_EVENT = 'AGENT_PROGRESS_UPDATE';
+const AGENT_FILESYSTEM_MOUNT_SYNC_EVENT = 'AGENT_FILESYSTEM_MOUNT_SYNC';
 
 export const SyncContext = createContext<SyncContextType | undefined>(undefined);
 
@@ -70,6 +155,11 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
   const [connectionPhase, setConnectionPhase] = useState('idle');
   const [syncSettings, setSyncSettings] = useState<SyncSettings | null>(null);
   const [syncSession, setSyncSession] = useState<SyncSessionInfo | null>(null);
+  const [proposedActions, setProposedActions] = useState<any[]>([]);
+  const [agentWorkspace, setAgentWorkspace] = useState<AgentWorkspaceState | null>(null);
+  const [agentFilesystemMount, setAgentFilesystemMount] = useState<AgentFilesystemMountState | null>(null);
+  const [agentSession, setAgentSession] = useState<AgentSessionState | null>(null);
+  const [agentProgress, setAgentProgress] = useState<AgentProgressState | null>(null);
 
   const refreshTickets = useCallback(async () => {
     try {
@@ -77,6 +167,42 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
       setTickets(nextTickets);
     } catch (error) {
       console.error('Failed to refresh tickets from Rust sync state:', error);
+    }
+  }, []);
+
+  const fetchAgentProposals = useCallback(async () => {
+    try {
+      const actions = await invoke<any[]>('get_agent_proposals');
+      setProposedActions(actions);
+    } catch (error) {
+      console.error('Failed to fetch agent proposals:', error);
+    }
+  }, []);
+
+  const fetchAgentWorkspace = useCallback(async () => {
+    try {
+      const workspace = await invoke<AgentWorkspaceState>('get_agent_workspace');
+      setAgentWorkspace(workspace);
+    } catch (error) {
+      console.error('Failed to fetch agent workspace:', error);
+    }
+  }, []);
+
+  const fetchAgentFilesystemMount = useCallback(async () => {
+    try {
+      const mount = await invoke<AgentFilesystemMountState>('get_agent_filesystem_mount');
+      setAgentFilesystemMount(mount);
+    } catch (error) {
+      console.error('Failed to fetch agent filesystem mount:', error);
+    }
+  }, []);
+
+  const fetchAgentSession = useCallback(async () => {
+    try {
+      const session = await invoke<AgentSessionState>('get_agent_session');
+      setAgentSession(session);
+    } catch (error) {
+      console.error('Failed to fetch agent session:', error);
     }
   }, []);
 
@@ -132,12 +258,62 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
       removeTicketsListener = unlisten;
     });
 
+    let removeProposalsSyncListener: (() => void) | null = null;
+    void listen('AGENT_PROPOSALS_SYNC', () => {
+      void fetchAgentProposals();
+    }).then((unlisten) => {
+      removeProposalsSyncListener = unlisten;
+    });
+
+    let removeWorkspaceSyncListener: (() => void) | null = null;
+    void listen('AGENT_WORKSPACE_SYNC', () => {
+      void fetchAgentWorkspace();
+    }).then((unlisten) => {
+      removeWorkspaceSyncListener = unlisten;
+    });
+
+    let removeFilesystemMountSyncListener: (() => void) | null = null;
+    void listen(AGENT_FILESYSTEM_MOUNT_SYNC_EVENT, () => {
+      void fetchAgentFilesystemMount();
+    }).then((unlisten) => {
+      removeFilesystemMountSyncListener = unlisten;
+    });
+
+    let removeSessionSyncListener: (() => void) | null = null;
+    void listen(AGENT_SESSION_SYNC_EVENT, () => {
+      void fetchAgentSession();
+    }).then((unlisten) => {
+      removeSessionSyncListener = unlisten;
+    });
+
+    let removeProgressListener: (() => void) | null = null;
+    void listen<AgentProgressState>(AGENT_PROGRESS_EVENT, (event) => {
+      setAgentProgress(event.payload);
+      setAgentSession(event.payload.session);
+      if (event.payload.workspace) {
+        setAgentWorkspace(event.payload.workspace);
+      }
+    }).then((unlisten) => {
+      removeProgressListener = unlisten;
+    });
+
+    // Initial load of proposals
+    void fetchAgentProposals();
+    void fetchAgentWorkspace();
+    void fetchAgentFilesystemMount();
+    void fetchAgentSession();
+
     return () => {
       window.removeEventListener(SYNC_CONFIG_UPDATED_EVENT, handleSyncConfigUpdated);
       removeStatusListener?.();
       removeTicketsListener?.();
+      removeProposalsSyncListener?.();
+      removeWorkspaceSyncListener?.();
+      removeFilesystemMountSyncListener?.();
+      removeSessionSyncListener?.();
+      removeProgressListener?.();
     };
-  }, [loadSyncConfig, loadSyncStatus, refreshTickets]);
+  }, [fetchAgentFilesystemMount, fetchAgentProposals, fetchAgentSession, fetchAgentWorkspace, loadSyncConfig, loadSyncStatus, refreshTickets]);
 
   useEffect(() => {
     if (!syncSettings || !syncSession) {
@@ -200,6 +376,44 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
     }
   }, []);
 
+  const acceptProposals = async () => {
+    try {
+      await invoke('accept_agent_proposals');
+      setProposedActions([]);
+      await syncNow();
+    } catch (error) {
+      console.error('Failed to accept proposals:', error);
+    }
+  };
+
+  const rejectProposals = async () => {
+    try {
+      await invoke('reject_agent_proposals');
+      setProposedActions([]);
+    } catch (error) {
+      console.error('Failed to reject proposals:', error);
+    }
+  };
+
+  const pickAgentFilesystemMount = useCallback(async () => {
+    try {
+      const mount = await invoke<AgentFilesystemMountState>('pick_agent_filesystem_mount');
+      setAgentFilesystemMount(mount);
+      await fetchAgentWorkspace();
+    } catch (error) {
+      console.error('Failed to pick agent filesystem mount:', error);
+    }
+  }, [fetchAgentWorkspace]);
+
+  const clearAgentFilesystemMount = useCallback(async () => {
+    try {
+      await invoke('clear_agent_filesystem_mount');
+      await Promise.all([fetchAgentFilesystemMount(), fetchAgentWorkspace()]);
+    } catch (error) {
+      console.error('Failed to clear agent filesystem mount:', error);
+    }
+  }, [fetchAgentFilesystemMount, fetchAgentWorkspace]);
+
 
   return (
     <SyncContext.Provider
@@ -208,11 +422,20 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
         isConnected,
         hasRemoteSession,
         connectionPhase,
+        agentWorkspace,
+        agentFilesystemMount,
+        agentSession,
+        agentProgress,
         createTicket,
         updateTicket,
         updateTicketStatus,
         deleteTicket,
         syncNow,
+        proposedActions,
+        acceptProposals,
+        rejectProposals,
+        pickAgentFilesystemMount,
+        clearAgentFilesystemMount,
       }}
     >
       {children}

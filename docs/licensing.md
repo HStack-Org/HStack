@@ -5,7 +5,7 @@ This repository uses a split-license model aligned with the public/private archi
 ## Summary
 
 - The open product code is licensed under GPL-3.0-only.
-- `crates/hstack-core` is licensed under MPL-2.0.
+- `hstack-core` (in the [`humanstack-agent`](https://github.com/HStack-Org/humanstack-agent) repository) is licensed under MPL-2.0.
 
 ## Why
 
@@ -32,7 +32,7 @@ Applies to the public product code in this repository, including:
 
 Applies to:
 
-- `crates/hstack-core`
+- `hstack-core` in the `humanstack-agent` repository
 
 That crate has its own local license file because it is intentionally a separate shared layer.
 
@@ -50,6 +50,6 @@ The authoritative license markers are:
 
 - the repository and crate/package manifest metadata
 - the root [LICENSE](../LICENSE) file for GPL-3.0-only product code
-- [crates/hstack-core/LICENSE](../crates/hstack-core/LICENSE) for the MPL-2.0 shared core
+- the `humanstack-agent` repository LICENSE for the MPL-2.0 shared core
 
 When in doubt, preserve the architectural split described in [docs/public-private-contract.md](public-private-contract.md).
